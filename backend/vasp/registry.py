@@ -47,7 +47,7 @@ class VaspRegistry:
         # Index: (chain_value, address_lower) → list[VaspRecord]
         self._index: dict[tuple[str, str], list[VaspRecord]] = {}
         if isinstance(label_data, dict):
-            records = label_data.get("records", [])
+            records = label_data.get("entries", label_data.get("records", []))
         else:
             records = label_data
         self._load(records)
@@ -223,8 +223,11 @@ class VaspRegistry:
 def load_registry_from_file(filepath: str) -> VaspRegistry:
     with open(filepath, "r", encoding="utf-8") as f:
         data = json.load(f)
-    if isinstance(data, dict) and "records" in data:
-        data = data["records"]
+    if isinstance(data, dict):
+        if "entries" in data:
+            data = data["entries"]
+        elif "records" in data:
+            data = data["records"]
     return VaspRegistry(data)
 
 

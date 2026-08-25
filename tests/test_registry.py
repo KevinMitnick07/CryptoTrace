@@ -88,3 +88,53 @@ def test_tron_historical_balance_limitation(caplog):
         assert res.status.value == "UNAVAILABLE_PROVIDER"
         warning_found = any("historical balance at block 50000000 not supported on TRONGrid free tier" in record.message for record in caplog.records)
         assert warning_found, "TronAdapter must log a warning when historical at_block balance is requested"
+
+
+def test_load_registry_from_json_file():
+    """
+    Validates that load_registry_from_file correctly loads the default vasp_labels.json
+    supporting the 'entries' top-level key.
+    """
+    import os
+    from backend.vasp.registry import load_registry_from_file
+
+    path = os.path.normpath(os.path.join(os.path.dirname(__file__), "../backend/vasp/data/vasp_labels.json"))
+    registry = load_registry_from_file(path)
+    stats = registry.stats()
+    assert stats["total_entries"] >= 10
+    assert stats["unique_addresses"] >= 10
+
+    # Look up known Ethereum Binance address
+    res_eth = registry.lookup(Chain.ETHEREUM, "0x28c6c06298d514db089934071355e5743bf21d60")
+    assert res_eth.primary_claim is not None
+    assert res_eth.primary_claim.entity_name == "Binance"
+
+    # Look up known TRON Binance address
+    res_tron = registry.lookup(Chain.TRON, "TQrY8tryqsYVCZS2XhC26R9FAMt2FkHx7a")
+    assert res_tron.primary_claim is not None
+    assert res_tron.primary_claim.entity_name == "Binance"
+
+
+def test_registry_supports_records_and_entries_dicts():
+    """
+    Validates that VaspRegistry constructor accepts dicts with either 'entries' or 'records'.
+    """
+    sample_entry = {
+        "chain": "ETHEREUM",
+        "address": "0x1111111111111111111111111111111111111111",
+        "entity_name": "TestExchange",
+        "first_observed": "2024-01-01T00:00:00",
+        "last_verified": "2026-01-01T00:00:00",
+        "confidence": "HIGH",
+    }
+
+    # Dict with 'entries'
+    reg_entries = VaspRegistry({"entries": [sample_entry]})
+    assert reg_entries.stats()["total_entries"] == 1
+    assert reg_entries.get(Chain.ETHEREUM, "0x1111111111111111111111111111111111111111").entity_name == "TestExchange"
+
+    # Dict with 'records'
+    reg_records = VaspRegistry({"records": [sample_entry]})
+    assert reg_records.stats()["total_entries"] == 1
+    assert reg_records.get(Chain.ETHEREUM, "0x1111111111111111111111111111111111111111").entity_name == "TestExchange"
+
