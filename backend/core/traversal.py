@@ -254,13 +254,31 @@ class AdaptiveTraversalEngine:
                 continue
 
             fetch_limit = config.max_branches_per_hop + 20
-            outgoing = adapter.get_transfers_from(
-                address=address,
-                asset=asset,
-                after_block=after_block,
-                before_block=None,
-                limit=fetch_limit,
-            )
+            try:
+                outgoing = adapter.get_transfers_from(
+                    address=address,
+                    asset=asset,
+                    after_block=after_block,
+                    before_block=None,
+                    limit=fetch_limit,
+                )
+            except Exception as exc:
+                log.warning("Provider query failed for %s on %s: %s", address, chain, exc)
+                branch_audit.append(BranchAuditRecord(
+                    from_address=parent_hash or "",
+                    to_address=address,
+                    tx_hash=parent_hash or "",
+                    chain=chain,
+                    asset=asset,
+                    amount=remaining_value,
+                    victim_attributed_range=ValueInterval(remaining_value, remaining_value, asset),
+                    disposition=BranchDisposition.DEFERRED_BUDGET,
+                    reason=f"Provider query limited/failed: {str(exc)[:150]}. Marked as unresolved.",
+                    tier=hop + 1,
+                    timestamp=utc_now(),
+                ))
+                unresolved_addresses.append(address)
+                continue
 
             if not outgoing:
                 unresolved_addresses.append(address)
@@ -275,8 +293,10 @@ class AdaptiveTraversalEngine:
             if len(outgoing) == 1 and hop > 0:
                 peeling_count += 1
 
-            # High fragmentation detection
-            if len(outgoing) >= 20:
+            # High fragmentation detection:
+            # Fire if >= 20 distinct outgoing transfers, OR if the adapter returned exactly
+            # fetch_limit items (saturation proxy — the adapter may have more).
+            if len(outgoing) >= 20 or len(outgoing) == fetch_limit:
                 high_fragmentation = True
 
             # Assign tiers to each branch
@@ -387,6 +407,33 @@ class AdaptiveTraversalEngine:
                         transfer.tx_hash,
                         transfer.block_number,
                     ))
+
+        # Budget exhausted: drain remaining queue items and record them.
+        # This ensures no victim-attributed value is silently lost when max_total_nodes is hit.
+        while queue:
+            rem_addr, rem_chain, rem_asset, rem_value, rem_hop, rem_parent, _rem_block = queue.popleft()
+            node_key_rem = f"{rem_chain.value}:{rem_addr}"
+            if node_key_rem in visited:
+                continue
+            total_deferred_mass += rem_value
+            branch_audit.append(BranchAuditRecord(
+                from_address=rem_parent or "",
+                to_address=rem_addr,
+                tx_hash=rem_parent or "",
+                chain=rem_chain,
+                asset=rem_asset,
+                amount=rem_value,
+                victim_attributed_range=ValueInterval(rem_value, rem_value, rem_asset),
+                disposition=BranchDisposition.BUDGET_EXHAUSTED,
+                reason=(
+                    f"max_total_nodes ({config.max_total_nodes}) reached. "
+                    "This is a computation budget limit, NOT a forensic boundary. "
+                    f"Estimated {float(rem_value):.4f} {rem_asset.value} in victim value remains unexamined."
+                ),
+                tier=rem_hop + 1,
+                timestamp=utc_now(),
+            ))
+            unresolved_addresses.append(rem_addr)
 
         # Compute unresolved value interval and completeness metrics
         traced_max = sum(

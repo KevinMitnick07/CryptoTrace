@@ -26,17 +26,21 @@ log = logging.getLogger(__name__)
 
 @dataclass
 class RouterEntry:
-    address: str          # lowercase
+    address: str          # lowercase for Ethereum; Base58Check lower for TRON
     protocol: str
     chain: Chain
     version: str
+    requires_live_verification: bool = False  # True = address needs live-chain confirmation before forensic use
 
 ROUTER_REGISTRY: list[RouterEntry] = [
+    # Ethereum — Uniswap — verified contract addresses
     RouterEntry("0x7a250d5630b4cf539739df2c5dacb4c659f2488d", "uniswap_v2", Chain.ETHEREUM, "v2"),
     RouterEntry("0xe592427a0aece92de3edee1f18e0157c05861564", "uniswap_v3", Chain.ETHEREUM, "v3"),
     RouterEntry("0x68b3465833fb72a70ecdf485e0e4c7bd8665fc45", "uniswap_v3", Chain.ETHEREUM, "v3_02"),
-    RouterEntry("txfbf6475bfedcc9e31871fa6c1f4873f67dc0d56", "sunswap_v2", Chain.TRON, "v2"),
-    RouterEntry("tv9qhhtfkxnxnrx87nxzxmjn1y3rlxwjdq0p", "sunswap_v2", Chain.TRON, "v2"),
+    # TRON — SunSwap V2 — requires live TRONGrid confirmation before treating as forensic evidence.
+    # Address: TXF4UzjyHFDcxFUGqhDDKaUWdGNDuZhEg8 is the published SunSwap V2 router on TRON mainnet.
+    # Use scripts/validate_live_tron.py to confirm this contract is active before relying on it.
+    RouterEntry("TXF4UzjyHFDcxFUGqhDDKaUWdGNDuZhEg8".lower(), "sunswap_v2", Chain.TRON, "v2", requires_live_verification=True),
 ]
 
 _ROUTER_LOOKUP: dict[tuple[Chain, str], RouterEntry] = {

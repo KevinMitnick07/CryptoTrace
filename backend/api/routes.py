@@ -63,16 +63,33 @@ logging.basicConfig(level=logging.INFO)
 
 app = FastAPI(
     title="CryptoTrace — SIH 26183 Investigation Platform",
-    description="Court-defensible, victim-centric VASP attribution and blockchain analytics system.",
+    description=(
+        "Victim-centric forensic VASP attribution and blockchain analytics system. "
+        "Produces investigator-reviewable forensic evidence packages. "
+        "Software conclusions are advisory and require authorised investigator review."
+    ),
     version="0.2.0-sprint",
     docs_url="/docs",
 )
 
+# CORS configuration.
+# Default: wildcard, suitable for local demo / hackathon use.
+# Set CORS_STRICT=1 to restrict to ALLOWED_ORIGINS (space-separated list).
+# Example: ALLOWED_ORIGINS="http://localhost:8000 http://127.0.0.1:8000"
+_cors_strict = os.getenv("CORS_STRICT", "0").strip() == "1"
+_allowed_origins_env = os.getenv("ALLOWED_ORIGINS", "")
+_allowed_origins: list[str] = (
+    [o.strip() for o in _allowed_origins_env.split() if o.strip()]
+    if (_cors_strict and _allowed_origins_env)
+    else ["http://localhost:8000", "http://127.0.0.1:8000"]
+    if _cors_strict
+    else ["*"]
+)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_origins=_allowed_origins,
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    allow_headers=["Content-Type", "X-API-Key", "Authorization", "X-Request-ID"],
 )
 
 
@@ -1109,6 +1126,35 @@ async def trigger_monitor_poll():
     if not MONITOR_SERVICE:
         raise HTTPException(status_code=500, detail="Monitor service not available")
     return MONITOR_SERVICE.poll_once()
+
+
+@app.get("/api/alerts")
+async def get_all_alerts(unack_only: bool = False, limit: int = 100):
+    """Retrieve system-wide internal alert events."""
+    if not STORE:
+        return {"alerts": [], "count": 0}
+    alerts = STORE.get_alerts(case_id=None, unack_only=unack_only, limit=limit)
+    return {"alerts": alerts, "count": len(alerts)}
+
+
+@app.get("/api/cases/{case_id}/alerts")
+async def get_case_alerts(case_id: str, unack_only: bool = False, limit: int = 50):
+    """Retrieve alert events for a specific investigation case."""
+    if not STORE:
+        return {"case_id": case_id, "alerts": [], "count": 0}
+    alerts = STORE.get_alerts(case_id=case_id, unack_only=unack_only, limit=limit)
+    return {"case_id": case_id, "alerts": alerts, "count": len(alerts)}
+
+
+@app.post("/api/alerts/{alert_id}/acknowledge")
+async def acknowledge_alert(alert_id: str):
+    """Acknowledge an alert event."""
+    if not STORE:
+        raise HTTPException(status_code=500, detail="Store unavailable")
+    success = STORE.acknowledge_alert(alert_id)
+    if not success:
+        raise HTTPException(status_code=404, detail="Alert not found")
+    return {"alert_id": alert_id, "acknowledged": True}
 
 
 @app.get("/api/chains/health")

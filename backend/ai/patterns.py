@@ -98,7 +98,7 @@ class AdvisoryPatternClassifier:
                     f"Victim value reached {case.primary_stable_vasp.record.entity_name} within {features.hop_count} hops",
                     f"VASP endpoint stability rated {case.primary_stable_vasp.endpoint_stability.value}",
                 ],
-                investigative_advice=f"Actionable custodial endpoint reached at {case.primary_stable_vasp.record.entity_name}. Expedited LEA preservation request (Section 91 CrPC / Subpoena) is defensible.",
+                investigative_advice=f"Actionable custodial endpoint reached at {case.primary_stable_vasp.record.entity_name}. Authorized record request may be considered by investigating authority. Human and authorized legal review required.",
             ))
 
         return patterns

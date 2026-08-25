@@ -273,3 +273,114 @@ def test_vasp_boundary_stops_traversal(fake_eth_adapter):
     assert binance_addr in result.vasp_candidates
     vasp_audit = [b for b in result.branch_audit if b.disposition == BranchDisposition.VASP_BOUNDARY]
     assert len(vasp_audit) == 1
+
+
+def test_max_total_nodes_budget_drain_audits_remaining_queue(fake_eth_adapter):
+    """
+    When max_total_nodes is hit mid-traversal, remaining queue items must:
+    1. Receive BUDGET_EXHAUSTED audit records (not silently dropped).
+    2. Have their victim-attributed value counted in total_deferred_mass.
+
+    Setup: Linear chain of 15 hops. max_total_nodes=5.
+    Expect exactly 5 nodes visited, then the remaining 10 queue items audited as BUDGET_EXHAUSTED.
+    """
+    victim_val = Decimal("10000.00")
+    config = TraversalConfig(max_total_nodes=5, max_hops=20)
+
+    # Linear chain: hop_0 -> hop_1 -> ... -> hop_14
+    for i in range(15):
+        fake_eth_adapter.outgoing_transfers[f"0x_hop_{i}"] = [
+            OnChainTransfer(
+                tx_hash=f"0x_tx_{i}",
+                chain=Chain.ETHEREUM,
+                asset=Asset.USDT_ERC20,
+                amount=Decimal("10000.00"),
+                from_address=f"0x_hop_{i}",
+                to_address=f"0x_hop_{i+1}",
+                block_number=1000 + i,
+                block_timestamp=datetime.datetime(2026, 8, 1, 10, i),
+                tx_state=TxState.CONFIRMED,
+            )
+        ]
+
+    engine = AdaptiveTraversalEngine(
+        adapter_registry={Chain.ETHEREUM: fake_eth_adapter},
+        vasp_registry=lambda chain, addr: None,
+        mixer_detector=lambda chain, addr: False,
+        config=config,
+    )
+
+    result = engine.trace(
+        start_address="0x_hop_0",
+        start_chain=Chain.ETHEREUM,
+        start_asset=Asset.USDT_ERC20,
+        victim_value=victim_val,
+        start_block=1000,
+        start_timestamp=datetime.datetime(2026, 8, 1, 9, 50),
+    )
+
+    # Exactly 5 nodes must have been visited
+    assert result.total_nodes_visited == 5
+
+    # Remaining queue items must be audited as BUDGET_EXHAUSTED, not silently dropped
+    exhausted = [b for b in result.branch_audit if b.disposition == BranchDisposition.BUDGET_EXHAUSTED]
+    assert len(exhausted) > 0, (
+        "BUDGET_EXHAUSTED audit records must be emitted when max_total_nodes is hit. "
+        "Silent queue drain is a forensic accounting failure."
+    )
+
+    # The reason string must communicate this is a computation budget limit
+    for rec in exhausted:
+        assert "computation budget limit" in rec.reason.lower() or "max_total_nodes" in rec.reason
+
+
+def test_adapter_saturation_flags_high_fragmentation(fake_eth_adapter):
+    """
+    When the adapter returns exactly fetch_limit transfers (saturation proxy),
+    high_fragmentation_detected must be set to True, even if abs count < 20.
+
+    fetch_limit = max_branches_per_hop + 20 = 5 + 20 = 25.
+    Set max_branches_per_hop=5. Supply exactly 25 transfers.
+    All 25 amounts are above dust — no other fragmentation trigger fires.
+    """
+    victim_val = Decimal("10000.00")
+    config = TraversalConfig(max_branches_per_hop=5)
+    fetch_limit = config.max_branches_per_hop + 20  # 25
+
+    # Exactly fetch_limit transfers — adapter is saturated
+    outgoing = [
+        OnChainTransfer(
+            tx_hash=f"0x_tx_{i}",
+            chain=Chain.ETHEREUM,
+            asset=Asset.USDT_ERC20,
+            amount=Decimal("400.00"),   # 4% of victim value — above dust, above economic threshold
+            from_address="0x_suspect",
+            to_address=f"0x_dest_{i}",
+            block_number=1000 + i,
+            block_timestamp=datetime.datetime(2026, 8, 1, 10, 0) + datetime.timedelta(seconds=i),
+            tx_state=TxState.CONFIRMED,
+        )
+        for i in range(fetch_limit)  # Exactly saturates the fetch limit
+    ]
+    fake_eth_adapter.outgoing_transfers["0x_suspect"] = outgoing
+
+    engine = AdaptiveTraversalEngine(
+        adapter_registry={Chain.ETHEREUM: fake_eth_adapter},
+        vasp_registry=lambda chain, addr: None,
+        mixer_detector=lambda chain, addr: False,
+        config=config,
+    )
+
+    result = engine.trace(
+        start_address="0x_suspect",
+        start_chain=Chain.ETHEREUM,
+        start_asset=Asset.USDT_ERC20,
+        victim_value=victim_val,
+        start_block=1000,
+        start_timestamp=datetime.datetime(2026, 8, 1, 9, 50),
+    )
+
+    assert result.high_fragmentation_detected is True, (
+        f"high_fragmentation_detected must be True when adapter returns exactly fetch_limit={fetch_limit} "
+        "transfers (saturation proxy). This indicates more transfers may exist beyond the query limit."
+    )

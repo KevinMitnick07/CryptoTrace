@@ -114,6 +114,42 @@ class EvidencePackageGenerator:
                 "timestamp": b.timestamp.isoformat() if b.timestamp else None,
             })
 
+        # Build Investigator Action Packet
+        has_mixer = any(
+            "mixer" in b.reason.lower() or b.disposition == BranchDisposition.MIXER_BOUNDARY
+            for b in self.case.branch_audit
+        )
+        prim_vasp_name = self.case.primary_stable_vasp.record.entity_name if self.case.primary_stable_vasp else None
+        target_addr = (
+            self.case.primary_stable_vasp.address_in_path
+            if self.case.primary_stable_vasp
+            else (self.case.complaint.reported_wallet if self.case.complaint else None)
+        )
+        action_packet = {
+            "primary_supported_vasp": prim_vasp_name,
+            "target_address": target_addr,
+            "endpoint_stability": self.case.primary_stable_vasp.endpoint_stability.value if self.case.primary_stable_vasp else "UNRESOLVED",
+            "actionability_state": self.case.actionability.value if hasattr(self.case.actionability, "value") else str(self.case.actionability),
+            "trace_completeness_pct": str(self.case.trace_completeness_pct),
+            "unresolved_value_range": {
+                "lower_bound": str(self.case.unresolved_value.lower_bound) if self.case.unresolved_value else "0",
+                "upper_bound": str(self.case.unresolved_value.upper_bound) if self.case.unresolved_value else "0",
+            },
+            "mixer_boundary_detected": has_mixer,
+            "human_review_required": True,
+            "suggested_record_categories": [
+                "Account Registration Details & KYC (Full Legal Name, Government ID, Email/Phone)",
+                "Deposit Transaction Timestamps, Source Addresses & IP Login Logs",
+                "Internal Ledger / Counterparty Transfers Originating from Identified Deposit",
+                "Current Account Balance and Active Linked Withdrawal Destinations",
+            ],
+            "advisory_notice": (
+                "This action packet is generated for authorized investigator review. "
+                "Software outputs are advisory. Authorized human review and lawful process "
+                "are required before issuing official preservation or record requests."
+            ),
+        }
+
         package_body = {
             "metadata": {
                 "case_id": self.case.case_id,
@@ -121,7 +157,7 @@ class EvidencePackageGenerator:
                 "investigator_reference": self.investigator_id,
                 "generated_at_utc": now,
                 "software_version": self.case.software_version,
-                "jurisdiction_standard": "Court Defensible Blockchain Attribution (Forensic Standard)",
+                "jurisdiction_standard": "Investigator-Reviewable Forensic Blockchain Analytics (Advisory Standard)",
             },
             "intake_complaint": {
                 "reported_wallet": self.case.complaint.reported_wallet,
@@ -151,7 +187,7 @@ class EvidencePackageGenerator:
                 },
             },
             "primary_identified_vasp": {
-                "entity_name": self.case.primary_stable_vasp.record.entity_name if self.case.primary_stable_vasp else None,
+                "entity_name": prim_vasp_name,
                 "address": self.case.primary_stable_vasp.address_in_path if self.case.primary_stable_vasp else None,
                 "stability": self.case.primary_stable_vasp.endpoint_stability.value if self.case.primary_stable_vasp else None,
                 "attributed_value_range": (
@@ -159,6 +195,7 @@ class EvidencePackageGenerator:
                     if self.case.primary_stable_vasp else None
                 ),
             },
+            "investigator_action_packet": action_packet,
             "hop_chronology": hops_data,
             "vasp_attributions": vasp_data,
             "branch_audit_log": audit_data,
@@ -194,6 +231,7 @@ class EvidencePackageGenerator:
         anchor = pkg["anchor_assessment"]
         summary = pkg["trace_summary"]
         prim_vasp = pkg["primary_identified_vasp"]
+        action = pkg.get("investigator_action_packet", {})
 
         md = []
         md.append("# FORENSIC BLOCKCHAIN EVIDENCE PACKAGE")
@@ -258,12 +296,22 @@ class EvidencePackageGenerator:
             md.append(f"*(...and {len(pkg['branch_audit_log']) - 20} additional audited branches)*")
         md.append("")
 
+        if action:
+            md.append("## 6. Investigator Action Packet")
+            md.append(f"- **Primary Actionable Endpoint:** `{action.get('primary_supported_vasp') or 'None identified'}`")
+            md.append(f"- **Target Wallet:** `{action.get('target_address') or '—'}`")
+            md.append(f"- **Stability Tier:** `{action.get('endpoint_stability')}` | **Actionability:** `{action.get('actionability_state')}`")
+            md.append("- **Suggested Record Categories for Authorized Request:**")
+            for cat in action.get("suggested_record_categories", []):
+                md.append(f"  - {cat}")
+            md.append(f"\n> **Advisory Notice:** {action.get('advisory_notice')}\n")
+
         md.append("---")
         md.append("### FORENSIC DISCLAIMER")
         md.append(
             "> Multi-hypothesis attributions represent mathematical bounds under explicit analytical assumptions. "
             "Attribution intervals are not additive across models. "
-            "Cryptographic package SHA-256 guarantees evidence chain of custody."
+            "Cryptographic SHA-256 package hash guarantees evidence record integrity."
         )
 
         return "\n".join(md)

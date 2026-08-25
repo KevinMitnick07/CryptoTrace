@@ -227,3 +227,85 @@ def test_utxo_attribution_raises_not_implemented():
     engine = UTXOAttributionEngine("txid_01", 0, Decimal("1.5"))
     with pytest.raises(NotImplementedError):
         engine.propagate()
+
+
+# ===========================================================================
+# DECIMAL PRECISION CONSERVATION TESTS
+# ===========================================================================
+
+def test_conservation_6_decimal_usdt_erc20():
+    """
+    Conservation must hold for 6-decimal USDT_ERC20.
+    Smallest representable unit = 0.000001 USDT.
+    All 4 models must not allocate more than victim_value.
+    """
+    victim_val = Decimal("5000.000001")   # deliberate fractional base unit
+    engine = AccountBasedAttributionEngine(victim_val, Asset.USDT_ERC20)
+
+    outgoing = [
+        _make_transfer("0xtx_6dp_a", "0x_dest_a", Decimal("2500.000001"), asset=Asset.USDT_ERC20),
+        _make_transfer("0xtx_6dp_b", "0x_dest_b", Decimal("2500.000000"), asset=Asset.USDT_ERC20),
+    ]
+
+    result = engine.allocate(Decimal("0.000000"), outgoing)
+
+    for model in AllocationModel:
+        total_allocated = sum(result[model].values())
+        assert total_allocated <= victim_val, (
+            f"{model}: allocated {total_allocated} > victim_val {victim_val}. "
+            "Conservation violated on 6-decimal USDT_ERC20."
+        )
+
+    # Explicit conservation check using the precision tool (correct 3-arg signature)
+    violations = _value_conservation_check(victim_val, result, Asset.USDT_ERC20)
+    assert violations == [], f"Conservation violations: {violations}"
+
+
+def test_conservation_18_decimal_eth():
+    """
+    Conservation must hold for 18-decimal ETH.
+    Test values include a 1-wei (1e-18 ETH) residual.
+    """
+    victim_val = Decimal("3.141592653589793238")   # 18-decimal precision ETH
+    engine = AccountBasedAttributionEngine(victim_val, Asset.ETH)
+
+    outgoing = [
+        _make_transfer("0xtx_18dp_a", "0x_dest_a", Decimal("2.000000000000000000"), asset=Asset.ETH),
+        _make_transfer("0xtx_18dp_b", "0x_dest_b", Decimal("1.141592653589793238"), asset=Asset.ETH),
+    ]
+
+    result = engine.allocate(Decimal("0.000000000000000000"), outgoing)
+
+    for model in AllocationModel:
+        total_allocated = sum(result[model].values())
+        assert total_allocated <= victim_val, (
+            f"{model}: over-allocation on 18-decimal ETH. "
+            f"Allocated {total_allocated}, victim_val {victim_val}."
+        )
+
+
+def test_conservation_minimum_representable_usdt_unit():
+    """
+    Transfer of 1 base unit (0.000001 USDT_ERC20 = 1e-6) must not cause
+    floating-point drift or conservation failure.
+    """
+    victim_val = Decimal("0.000001")   # 1 satoshi of USDT
+    engine = AccountBasedAttributionEngine(victim_val, Asset.USDT_ERC20)
+
+    outgoing = [
+        _make_transfer("0xtx_1sat", "0x_dest_min", Decimal("0.000001"), asset=Asset.USDT_ERC20),
+    ]
+
+    result = engine.allocate(Decimal("0.000000"), outgoing)
+
+    for model in AllocationModel:
+        total = sum(result[model].values())
+        assert total <= victim_val, (
+            f"{model}: conservation violated for minimum representable USDT unit. "
+            f"Allocated {total} > {victim_val}."
+        )
+        # The allocation must be non-zero (not silently dropped)
+        assert total > Decimal("0"), (
+            f"{model}: minimum-unit transfer allocation was zero. "
+            "Micro-amounts must not be silently discarded."
+        )

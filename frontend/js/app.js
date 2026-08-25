@@ -19,6 +19,7 @@ function showSection(name) {
 
   if (name === 'cases') loadCases();
   if (name === 'scenarios') loadScenarios();
+  if (name === 'alerts') loadAlerts();
   if (name === 'registry') loadRegistryStats();
   if (name === 'health') {
     loadChainsHealth();
@@ -205,17 +206,27 @@ async function openCase(caseId) {
   showSection('case-detail');
   document.getElementById('detail-case-id').textContent = caseId;
 
-  // Tag classification if synthetic
+  // Tag classification based on case ID origin
+  // CASE-{8 hex chars}  = real complaint intake
+  // SCENARIO-{id}       = synthetic benchmark
   const tag = document.getElementById('detail-classification-tag');
   if (tag) {
-    if (caseId.includes('DIRECT') || caseId.includes('COMMINGLING') || caseId.includes('STABLE') || caseId.includes('FANOUT') || caseId.includes('PEELING') || caseId.includes('SYN')) {
-      tag.textContent = 'SYNTHETIC TEST DATA';
+    if (/^CASE-[0-9A-F]{8}$/i.test(caseId)) {
+      // Real case from complaint intake
+      tag.innerHTML = '🔴 LIVE BLOCKCHAIN DATA';
+      tag.style.background = '#fef2f2';
+      tag.style.color = '#991b1b';
+      tag.style.border = '1px solid #fecaca';
+    } else if (caseId.startsWith('SCENARIO-') || caseId.includes('-SYN-')) {
+      tag.innerHTML = '⚗ SYNTHETIC TEST DATA';
       tag.style.background = '#eff6ff';
       tag.style.color = '#1d4ed8';
+      tag.style.border = '1px solid #bfdbfe';
     } else {
-      tag.textContent = 'INVESTIGATION RECORD';
-      tag.style.background = '#f1f5f9';
-      tag.style.color = '#475569';
+      tag.innerHTML = '⚠ DATA SOURCE UNCLASSIFIED';
+      tag.style.background = '#fffbeb';
+      tag.style.color = '#92400e';
+      tag.style.border = '1px solid #fde68a';
     }
   }
 
@@ -245,6 +256,9 @@ function switchCaseTab(tabName) {
 
   if (tabName === 'graph' && window.cy) {
     setTimeout(() => { cy.resize(); cy.fit(); }, 50);
+  }
+  if (tabName === 'action' && currentCaseId) {
+    loadCaseActionPacket(currentCaseId);
   }
   if (tabName === 'attribution' && currentCaseId) {
     loadCaseAttributions(currentCaseId);
@@ -280,12 +294,33 @@ async function refreshCaseDetail(caseId) {
     document.getElementById('d-stability-reason').textContent = snap.stability_reason || 'Stability: UNRESOLVED';
     document.getElementById('d-state').innerHTML = formatStateBadge(c.state);
 
-    const completeness = snap.trace_completeness_pct || '100.0';
-    document.getElementById('d-completeness').textContent = `${parseFloat(completeness).toFixed(1)}% Complete`;
+    const completeness = parseFloat(snap.trace_completeness_pct || '100.0');
+    const completenessElem = document.getElementById('d-completeness');
+    if (completenessElem) {
+      if (completeness < 99.9) {
+        completenessElem.innerHTML = `
+          <span style="color:#b45309; font-weight:700;">
+            ⚠ INCOMPLETE — BUDGET EXHAUSTED (${completeness.toFixed(1)}% traced)
+          </span>
+          <span style="color:#92400e; font-size:11px; display:block; margin-top:2px;">
+            Remaining value may be unexamined. This is a computation limit, not a forensic conclusion.
+          </span>`;
+      } else {
+        completenessElem.textContent = `${completeness.toFixed(1)}% Complete`;
+      }
+    }
 
     const fragElem = document.getElementById('d-frag-flag');
     if (fragElem) {
-      fragElem.textContent = snap.high_fragmentation_detected ? '⚠ High Fragmentation Detected (>20 branches)' : '';
+      if (snap.high_fragmentation_detected) {
+        fragElem.innerHTML =
+          '<span style="color:#b45309; font-weight:600;">⚠ High Fragmentation Detected</span>' +
+          '<span style="color:#92400e; font-size:11px; display:block;">' +
+          'Suspected dust layering or adapter saturation (adapter returned maximum results). ' +
+          'Some branches may not have been examined.</span>';
+      } else {
+        fragElem.textContent = '';
+      }
     }
 
     const nodes = (graphData.nodes || []);
@@ -301,6 +336,14 @@ async function refreshCaseDetail(caseId) {
     }
   } catch (err) {
     console.error('Failed to refresh case:', err);
+    const caseDetail = document.getElementById('case-detail');
+    if (caseDetail) {
+      caseDetail.innerHTML = `
+        <div style="padding:24px; color:#991b1b; background:#fef2f2; border-radius:8px; border:1px solid #fecaca;">
+          <strong>Failed to load case details.</strong><br>
+          <span style="font-size:13px;">${escapeHtml(err.message || 'Unknown error')}</span>
+        </div>`;
+    }
   }
 }
 
@@ -941,12 +984,134 @@ function escapeHtml(str) {
 }
 
 // ---------------------------------------------------------------------------
+// Investigator Action Packet & Alerts UI
+// ---------------------------------------------------------------------------
+
+async function loadCaseActionPacket(caseId) {
+  const container = document.getElementById('action-packet-content');
+  if (!container) return;
+  try {
+    container.innerHTML = '<div class="empty-state">Loading action packet...</div>';
+    const pkg = await API.getEvidencePackageJson(caseId);
+    const action = pkg.investigator_action_packet || {};
+
+    const categoriesHtml = (action.suggested_record_categories || []).map(cat => `
+      <li style="margin-bottom:6px; color:#374151; font-size:12px;">${escapeHtml(cat)}</li>
+    `).join('');
+
+    container.innerHTML = `
+      <div style="display:grid; grid-template-columns: 1fr 1fr; gap:16px; margin-bottom:16px;">
+        <div style="background:#f8fafc; padding:14px; border-radius:6px; border:1px solid #e2e8f0;">
+          <div style="font-size:11px; font-weight:600; color:#64748b; text-transform:uppercase;">Primary Identified Endpoint</div>
+          <div style="font-size:16px; font-weight:700; color:#1a3a5c; margin-top:4px;">
+            ${escapeHtml(action.primary_supported_vasp || 'None identified')}
+          </div>
+          <div class="mono" style="font-size:12px; color:#475569; margin-top:4px; word-break:break-all;">
+            ${escapeHtml(action.target_address || '—')}
+          </div>
+        </div>
+
+        <div style="background:#f8fafc; padding:14px; border-radius:6px; border:1px solid #e2e8f0;">
+          <div style="font-size:11px; font-weight:600; color:#64748b; text-transform:uppercase;">Actionability & Stability</div>
+          <div style="display:flex; align-items:center; gap:8px; margin-top:6px;">
+            <span class="status-badge ${action.endpoint_stability === 'HIGH' ? 'badge-verified' : 'badge-ambiguous'}">${escapeHtml(action.endpoint_stability || 'UNRESOLVED')} Stability</span>
+            <span class="status-badge badge-active">${escapeHtml(action.actionability_state || 'NO_ACTIONABLE_ENDPOINT')}</span>
+          </div>
+          <div style="font-size:12px; color:#64748b; margin-top:6px;">
+            Trace Completeness: <b>${escapeHtml(action.trace_completeness_pct || '100.00')}%</b>
+          </div>
+        </div>
+      </div>
+
+      <div style="background:#ffffff; border:1px solid #e5e7eb; border-radius:6px; padding:14px; margin-bottom:16px;">
+        <h4 style="font-size:13px; font-weight:600; color:#1f2937; margin-bottom:8px;">Suggested Record Categories for Lawful Inquiry</h4>
+        <ul style="padding-left:20px; margin-bottom:12px;">
+          ${categoriesHtml}
+        </ul>
+      </div>
+
+      <div style="padding:12px; background:#fffbeb; border:1px solid #fde68a; border-radius:6px; font-size:12px; color:#92400e; line-height:1.4;">
+        <strong>Advisory & Legal Notice:</strong> ${escapeHtml(action.advisory_notice || 'Authorized human and legal review required.')}
+      </div>
+
+      <div style="margin-top:14px; display:flex; justify-content:flex-end; gap:8px;">
+        <button class="btn-primary" style="font-size:12px;" onclick="downloadEvidenceMarkdown('${escapeHtml(caseId)}')">Download Evidence Package (.md)</button>
+      </div>
+    `;
+  } catch (err) {
+    container.innerHTML = `<div class="empty-state" style="color:#991b1b;">Failed to load action packet: ${escapeHtml(err.message)}</div>`;
+  }
+}
+
+async function loadAlerts() {
+  const container = document.getElementById('alerts-list-container');
+  if (!container) return;
+  try {
+    const data = await API.getAlerts();
+    const alerts = data.alerts || [];
+
+    // Update badge
+    const unackCount = alerts.filter(a => !a.acknowledged).length;
+    const badge = document.getElementById('alerts-unread-badge');
+    if (badge) {
+      badge.textContent = unackCount;
+      badge.classList.toggle('hidden', unackCount === 0);
+    }
+
+    if (!alerts.length) {
+      container.innerHTML = '<div class="empty-state">No active investigation alerts. Continuous monitoring is running.</div>';
+      return;
+    }
+
+    container.innerHTML = `
+      <div style="display:flex; flex-direction:column; gap:12px;">
+        ${alerts.map(a => `
+          <div style="background:#ffffff; border:1px solid ${a.acknowledged ? '#e5e7eb' : (a.severity === 'WARNING' ? '#fde68a' : '#bfdbfe')}; border-left:4px solid ${a.acknowledged ? '#9ca3af' : (a.severity === 'WARNING' ? '#d97706' : '#2563eb')}; border-radius:6px; padding:14px; display:flex; justify-content:space-between; align-items:flex-start;">
+            <div>
+              <div style="display:flex; align-items:center; gap:8px; margin-bottom:4px;">
+                <span class="status-badge ${a.severity === 'WARNING' ? 'badge-ambiguous' : 'badge-verified'}" style="font-size:10px;">${escapeHtml(a.event_type)}</span>
+                <span class="status-badge" style="background:#f3f4f6; color:#4b5563; font-size:10px;">Case: <b class="mono" style="cursor:pointer;" onclick="openCase('${escapeHtml(a.case_id)}')">${escapeHtml(a.case_id)}</b></span>
+                <span style="font-size:11px; color:#6b7280;">${formatTime(a.created_at)}</span>
+              </div>
+              <div style="font-size:13px; font-weight:600; color:#1f2937; margin-top:2px;">${escapeHtml(a.summary)}</div>
+              ${a.evidence_reference ? `<div class="mono" style="font-size:11px; color:#64748b; margin-top:4px;">Evidence Ref: ${escapeHtml(a.evidence_reference)}</div>` : ''}
+            </div>
+            <div>
+              ${!a.acknowledged ? `
+                <button class="btn-ghost-sm" style="font-size:11px;" onclick="ackAlert('${escapeHtml(a.alert_id)}')">Acknowledge</button>
+              ` : `
+                <span style="font-size:11px; color:#9ca3af;">✓ Acknowledged</span>
+              `}
+            </div>
+          </div>
+        `).join('')}
+      </div>
+    `;
+  } catch (err) {
+    container.innerHTML = `<div class="empty-state" style="color:#991b1b;">Failed to load alerts: ${escapeHtml(err.message)}</div>`;
+  }
+}
+
+async function ackAlert(alertId) {
+  try {
+    await API.acknowledgeAlert(alertId);
+    loadAlerts();
+  } catch (err) {
+    alert(`Failed to acknowledge alert: ${err.message}`);
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Page Initialization
 // ---------------------------------------------------------------------------
 
 document.addEventListener('DOMContentLoaded', () => {
   showSection('cases');
   updateMonitorBadge();
+  loadAlerts();
   if (monitorInterval) clearInterval(monitorInterval);
-  monitorInterval = setInterval(updateMonitorBadge, 15000);
+  monitorInterval = setInterval(() => {
+    updateMonitorBadge();
+    loadAlerts();
+  }, 15000);
 });

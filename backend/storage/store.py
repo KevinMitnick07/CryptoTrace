@@ -14,7 +14,7 @@ from decimal import Decimal
 from typing import Optional
 from pathlib import Path
 
-from ..core.models import utc_now
+from ..core.models import utc_now, AlertEvent
 
 log = logging.getLogger(__name__)
 
@@ -121,7 +121,20 @@ class InvestigationStore:
                 next_retry_at        TEXT,
                 failure_count        INTEGER NOT NULL DEFAULT 0,
                 status               TEXT NOT NULL DEFAULT 'ACTIVE',
+                last_error_message   TEXT,
                 created_at           TEXT NOT NULL,
+                FOREIGN KEY (case_id) REFERENCES cases(case_id)
+            );
+
+            CREATE TABLE IF NOT EXISTS alerts (
+                alert_id           TEXT PRIMARY KEY,
+                case_id            TEXT NOT NULL,
+                event_type         TEXT NOT NULL,
+                severity           TEXT NOT NULL DEFAULT 'INFO',
+                created_at         TEXT NOT NULL,
+                summary            TEXT NOT NULL,
+                evidence_reference TEXT,
+                acknowledged       INTEGER NOT NULL DEFAULT 0,
                 FOREIGN KEY (case_id) REFERENCES cases(case_id)
             );
 
@@ -130,8 +143,17 @@ class InvestigationStore:
             CREATE INDEX IF NOT EXISTS idx_vasp_case ON vasp_findings(case_id);
             CREATE INDEX IF NOT EXISTS idx_snapshots_case ON case_snapshots(case_id);
             CREATE INDEX IF NOT EXISTS idx_watchers_status ON case_watchers(status);
+            CREATE INDEX IF NOT EXISTS idx_alerts_case ON alerts(case_id);
+            CREATE INDEX IF NOT EXISTS idx_alerts_ack ON alerts(acknowledged);
         """)
         self._conn.commit()
+        # Migration guard: add last_error_message column if it doesn't exist yet
+        # (supports upgrades from databases created before this column was added)
+        try:
+            self._conn.execute("ALTER TABLE case_watchers ADD COLUMN last_error_message TEXT")
+            self._conn.commit()
+        except Exception:
+            pass  # Column already exists
 
     def save_case(
         self,
@@ -300,16 +322,78 @@ class InvestigationStore:
                 UPDATE case_watchers SET
                     failure_count = failure_count + 1,
                     status = ?,
-                    next_retry_at = ?
+                    next_retry_at = ?,
+                    last_error_message = ?
                 WHERE case_id = ?
-            """, (status, now, case_id))
+            """, (status, now, error[:1000], case_id))  # truncate to 1000 chars
         else:
             cur.execute("""
                 UPDATE case_watchers SET
                     last_processed_block = ?,
                     last_success_at = ?,
                     failure_count = 0,
-                    status = 'ACTIVE'
+                    status = 'ACTIVE',
+                    last_error_message = NULL
                 WHERE case_id = ?
             """, (last_block, now, case_id))
         self._conn.commit()
+
+    def save_alert(
+        self,
+        alert_id: Union[AlertEvent, str],
+        case_id: Optional[str] = None,
+        event_type: Optional[str] = None,
+        severity: Optional[str] = None,
+        summary: Optional[str] = None,
+        evidence_reference: Optional[str] = None,
+        created_at: Optional[str] = None,
+    ) -> None:
+        if hasattr(alert_id, "alert_id"):
+            obj = alert_id
+            aid = obj.alert_id
+            cid = obj.case_id
+            etype = obj.event_type.value if hasattr(obj.event_type, "value") else str(obj.event_type)
+            sev = obj.severity.value if hasattr(obj.severity, "value") else str(obj.severity)
+            summ = obj.summary
+            ev_ref = obj.evidence_reference
+            now = obj.created_at.isoformat() if hasattr(obj.created_at, "isoformat") else str(obj.created_at)
+        else:
+            aid = str(alert_id)
+            cid = case_id
+            etype = event_type
+            sev = severity
+            summ = summary
+            ev_ref = evidence_reference
+            now = created_at or utc_now().isoformat()
+        cur = self._conn.cursor()
+        cur.execute("""
+            INSERT OR IGNORE INTO alerts (
+                alert_id, case_id, event_type, severity, created_at, summary, evidence_reference, acknowledged
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, 0)
+        """, (aid, cid, etype, sev, now, summ, ev_ref))
+        self._conn.commit()
+
+    def get_alerts(
+        self, case_id: Optional[str] = None, unack_only: bool = False, limit: int = 100
+    ) -> list[dict]:
+        cur = self._conn.cursor()
+        query = "SELECT * FROM alerts"
+        params: list[Any] = []
+        clauses = []
+        if case_id:
+            clauses.append("case_id = ?")
+            params.append(case_id)
+        if unack_only:
+            clauses.append("acknowledged = 0")
+        if clauses:
+            query += " WHERE " + " AND ".join(clauses)
+        query += " ORDER BY created_at DESC LIMIT ?"
+        params.append(limit)
+        cur.execute(query, tuple(params))
+        return [dict(r) for r in cur.fetchall()]
+
+    def acknowledge_alert(self, alert_id: str) -> bool:
+        cur = self._conn.cursor()
+        cur.execute("UPDATE alerts SET acknowledged = 1 WHERE alert_id = ?", (alert_id,))
+        self._conn.commit()
+        return cur.rowcount > 0

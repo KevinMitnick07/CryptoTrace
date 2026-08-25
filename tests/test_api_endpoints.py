@@ -47,9 +47,9 @@ def test_api_scenarios_listing_and_run(client):
 def test_api_intake_and_case_lifecycle(client):
     complaint_payload = {
         "complaint_ref": "TEST-INTAKE-001",
-        "reported_wallet": "TKHuVq1oKVruCGLvqVexFs6dawKv6fQgFs",
-        "reported_chain": "TRON",
-        "reported_asset": "USDT_TRC20",
+        "reported_wallet": "0x_test_intake_wallet_001",
+        "reported_chain": "ETHEREUM",
+        "reported_asset": "USDT_ERC20",
         "reported_amount": "5000.00",
         "reported_tx_hash": "0x_test_anchor_tx",
     }

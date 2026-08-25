@@ -634,3 +634,35 @@ class GraphEdge:
     victim_value_range: Optional[ValueInterval]
     tx_hash: Optional[str]
     label: Optional[str]
+
+
+# ---------------------------------------------------------------------------
+# Internal Alert Event System (Near-Real-Time Continuous Monitoring)
+# ---------------------------------------------------------------------------
+
+class AlertSeverity(str, Enum):
+    INFO = "INFO"
+    WARNING = "WARNING"
+    CRITICAL = "CRITICAL"
+
+
+class AlertEventType(str, Enum):
+    NEW_MOVEMENT = "NEW_MOVEMENT"
+    NEW_VASP_ENDPOINT = "NEW_VASP_ENDPOINT"
+    PRIMARY_VASP_CHANGED = "PRIMARY_VASP_CHANGED"
+    TRACE_BECAME_INCOMPLETE = "TRACE_BECAME_INCOMPLETE"
+    MIXER_BOUNDARY_REACHED = "MIXER_BOUNDARY_REACHED"
+    PROVIDER_DEGRADED = "PROVIDER_DEGRADED"
+    PROVIDER_RECOVERED = "PROVIDER_RECOVERED"
+
+
+@dataclass
+class AlertEvent:
+    alert_id: str
+    case_id: str
+    event_type: AlertEventType
+    severity: AlertSeverity
+    summary: str
+    evidence_reference: Optional[str] = None
+    created_at: datetime.datetime = field(default_factory=utc_now)
+    acknowledged: bool = False

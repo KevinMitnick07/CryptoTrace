@@ -116,4 +116,24 @@ const API = {
     if (!res.ok) throw new Error(`HTTP ${res.status}: Failed to fetch chains health`);
     return res.json();
   },
+
+  async getAlerts(unackOnly = false) {
+    const res = await fetch(`/api/alerts?unack_only=${unackOnly}`);
+    if (!res.ok) throw new Error(`HTTP ${res.status}: Failed to fetch alerts`);
+    return res.json();
+  },
+
+  async getCaseAlerts(caseId, unackOnly = false) {
+    const res = await fetch(`/api/cases/${encodeURIComponent(caseId)}/alerts?unack_only=${unackOnly}`);
+    if (!res.ok) throw new Error(`HTTP ${res.status}: Failed to fetch case alerts`);
+    return res.json();
+  },
+
+  async acknowledgeAlert(alertId) {
+    const res = await fetch(`/api/alerts/${encodeURIComponent(alertId)}/acknowledge`, {
+      method: 'POST',
+    });
+    if (!res.ok) throw new Error(`HTTP ${res.status}: Failed to acknowledge alert`);
+    return res.json();
+  },
 };

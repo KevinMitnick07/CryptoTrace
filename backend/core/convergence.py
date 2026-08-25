@@ -33,7 +33,13 @@ log = logging.getLogger(__name__)
 # Service popularity classification
 # Estimated monthly transaction counts for known high-volume services.
 # Used to normalize convergence signals.
-# These are order-of-magnitude estimates for prototype purposes.
+#
+# IMPORTANT: These are order-of-magnitude prototype estimates derived from
+# publicly available data and SIH synthetic scenarios. They are NOT live
+# on-chain measurements. All normalized_rarity values derived from this
+# table are labeled "SYNTHETIC_BASELINE" in CrossCaseSignal output.
+# Do NOT treat these as authoritative transaction volumes in a forensic
+# submission without independent verification.
 # ---------------------------------------------------------------------------
 
 SERVICE_MONTHLY_VOLUMES: dict[str, int] = {
@@ -48,27 +54,36 @@ SERVICE_MONTHLY_VOLUMES: dict[str, int] = {
     "Tornado Cash": 50_000,
 }
 
+# Inline label applied to all rarity values derived from SERVICE_MONTHLY_VOLUMES
+_SYNTHETIC_RARITY_PREFIX = "SYNTHETIC_BASELINE:"
+
 
 def _popularity_rarity(entity_name: Optional[str], address_monthly_volume: Optional[int]) -> str:
     """
     Classify the rarity of convergence on this service.
-    NEGLIGIBLE: major public exchange — convergence expected by chance
-    LOW:        mid-volume service — convergence weakly informative
-    MEDIUM:     lower-volume service — convergence somewhat informative
-    HIGH:       rare/low-volume service — convergence potentially significant
+    Returns a prefixed label to make clear this is derived from a synthetic baseline:
+      SYNTHETIC_BASELINE:NEGLIGIBLE -- major public exchange, convergence expected by chance
+      SYNTHETIC_BASELINE:LOW        -- mid-volume service, convergence weakly informative
+      SYNTHETIC_BASELINE:MEDIUM     -- lower-volume service, convergence somewhat informative
+      SYNTHETIC_BASELINE:HIGH       -- rare/low-volume service, convergence potentially significant
+    UNKNOWN                         -- no volume estimate available at all
     """
     if entity_name:
         volume = SERVICE_MONTHLY_VOLUMES.get(entity_name, address_monthly_volume or 0)
     else:
         volume = address_monthly_volume or 0
 
+    if volume == 0:
+        return "UNKNOWN"
     if volume > 1_000_000:
-        return "NEGLIGIBLE"
-    if volume > 100_000:
-        return "LOW"
-    if volume > 10_000:
-        return "MEDIUM"
-    return "HIGH"
+        tier = "NEGLIGIBLE"
+    elif volume > 100_000:
+        tier = "LOW"
+    elif volume > 10_000:
+        tier = "MEDIUM"
+    else:
+        tier = "HIGH"
+    return f"{_SYNTHETIC_RARITY_PREFIX}{tier}"
 
 
 # ---------------------------------------------------------------------------
@@ -155,20 +170,22 @@ class CaseConvergenceAnalyzer:
             if entity_name and SERVICE_MONTHLY_VOLUMES.get(entity_name, 0) > 500_000:
                 alternative = (
                     f"{entity_name} is a high-volume public service "
-                    f"(estimated {SERVICE_MONTHLY_VOLUMES.get(entity_name, 0):,} "
-                    "transactions/month). Convergence is expected by chance and "
-                    "does not indicate coordination."
+                    f"(prototype estimate: {SERVICE_MONTHLY_VOLUMES.get(entity_name, 0):,} "
+                    "transactions/month — synthetic baseline, not live measurement). "
+                    "Convergence on this address is expected by chance and "
+                    "does not independently indicate coordination."
                 )
             elif entity_name:
                 alternative = (
                     f"{entity_name} is a recognized service. "
-                    "Verify transaction volume before treating convergence as significant."
+                    "Verify transaction volume independently before treating convergence as significant. "
+                    "Volume baseline used here is a synthetic prototype estimate."
                 )
             else:
                 alternative = (
-                    "Address is unattributed. If it is a legitimate high-volume service "
-                    "not in the registry, convergence may not be significant. "
-                    "Manual volume verification recommended."
+                    "Address is unattributed in the VASP registry. If it is a legitimate high-volume service "
+                    "not registered, convergence may be coincidental. "
+                    "Manual on-chain volume verification is recommended before drawing conclusions."
                 )
 
             convergence_note = _convergence_note(
