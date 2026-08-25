@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+env/
+venv/
+ENV/
+
+# Testing & Cache
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Databases
+*.db
+*.db-wal
+*.db-shm
+
+# Environment & Secrets
+.env
+.env.*
+!.env.example
+
+# IDE & OS
+.DS_Store
+.vscode/
+.idea/

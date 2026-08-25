@@ -1,0 +1,383 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>CryptoTrace — Forensic Blockchain Intelligence Platform</title>
+  <meta name="description" content="Evidence-oriented, victim-centric VASP attribution and multi-hypothesis fund tracing system. SIH 26183.">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/static/css/main.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/cytoscape/3.28.1/cytoscape.min.js"></script>
+</head>
+<body>
+  <!-- Top navigation bar -->
+  <header class="topbar">
+    <div class="topbar-left">
+      <span class="topbar-brand">CryptoTrace</span>
+      <span class="topbar-tag">SIH 26183 · Forensic Standard</span>
+    </div>
+    <nav class="topbar-nav">
+      <button class="nav-btn active" id="nav-cases" onclick="showSection('cases')">Cases</button>
+      <button class="nav-btn" id="nav-scenarios" onclick="showSection('scenarios')">Synthetic Benchmarks</button>
+      <button class="nav-btn" id="nav-new" onclick="showSection('new-case')">New Complaint</button>
+      <button class="nav-btn" id="nav-registry" onclick="showSection('registry')">VASP Registry</button>
+      <button class="nav-btn" id="nav-health" onclick="showSection('health')">Chain Health</button>
+    </nav>
+    <div class="topbar-right" style="display:flex; align-items:center; gap:12px;">
+      <span id="monitor-badge" class="status-badge" style="background:#064e3b; color:#a7f3d0; font-size:11px; padding:3px 10px; cursor:pointer;" onclick="showSection('health')" title="Click to view monitor details">● MONITOR IDLE</span>
+      <span class="topbar-version">v0.2.0-sprint</span>
+    </div>
+  </header>
+
+  <!-- Main workspace -->
+  <main class="workspace">
+
+    <!-- ============================
+         SECTION: Synthetic Benchmarks
+         ============================ -->
+    <section id="section-scenarios" class="section hidden">
+      <div class="section-header" style="display:flex; justify-content:space-between; align-items:flex-start;">
+        <div>
+          <h1 class="section-title">Deterministic Benchmark Evaluation</h1>
+          <p class="section-sub">16 ground-truth test vectors validating multi-hypothesis attribution, stability, and adaptive traversal invariants.</p>
+        </div>
+        <span class="status-badge" style="background:#eff6ff; color:#1d4ed8; border:1px solid #bfdbfe;">SYNTHETIC TEST SUITE</span>
+      </div>
+
+      <!-- Execution Result Banner/Card (if scenario ran) -->
+      <div id="scenario-result-box" class="hidden" style="margin-bottom:24px; background:#ffffff; border:1px solid #10b981; border-radius:6px; padding:18px; box-shadow:0 1px 3px rgba(0,0,0,0.06);">
+        <!-- Populated dynamically by app.js -->
+      </div>
+
+      <div class="scenarios-grid" id="scenarios-list" style="display:grid; grid-template-columns: repeat(auto-fill, minmax(340px, 1fr)); gap:18px;">
+        <div class="empty-state">Loading synthetic benchmark suite...</div>
+      </div>
+    </section>
+
+    <!-- ============================
+         SECTION: New Complaint
+         ============================ -->
+    <section id="section-new-case" class="section hidden">
+      <div class="section-header">
+        <h1 class="section-title">New Complaint Intake</h1>
+        <p class="section-sub">Enter victim-reported information. Higher anchor confidence produces stronger evidence-oriented attributions.</p>
+      </div>
+
+      <div class="anchor-guide">
+        <div class="anchor-guide-title">Anchor Verification Hierarchy</div>
+        <div class="anchor-levels">
+          <div class="anchor-level"><span class="level-badge">A</span> <b>Level A (Transaction Hash):</b> Deterministic on-chain verification against raw ledger events.</div>
+          <div class="anchor-level"><span class="level-badge" style="background:#2563eb;">B</span> <b>Level B (Exact Amount + Timestamp):</b> Single matching transaction candidate within 60-minute window.</div>
+          <div class="anchor-level"><span class="level-badge" style="background:#d97706;">C</span> <b>Level C (Payment Proof):</b> Bank wire / off-chain fiat receipt with unconfirmed on-chain deposit.</div>
+          <div class="anchor-level"><span class="level-badge level-d-badge">D</span> <b>Level D (Wallet Only):</b> Pure unverified wallet address anchor with preserved ambiguity.</div>
+        </div>
+      </div>
+
+      <div class="form-pane">
+        <div id="intake-error" class="hidden" style="margin-bottom:16px; padding:10px 14px; background:#fef2f2; border:1px solid #fecaca; border-radius:4px; color:#991b1b; font-size:13px;"></div>
+
+        <div class="form-grid">
+          <div class="field-group">
+            <label class="field-label">Complaint Reference <span class="required">*</span></label>
+            <input type="text" id="f-complaint-ref" class="field-input" placeholder="e.g. NCRP/2026/CYBER/00491">
+          </div>
+          <div class="field-group">
+            <label class="field-label">Blockchain Network <span class="required">*</span></label>
+            <select id="f-chain" class="field-input">
+              <option value="TRON">TRON (TRC-20)</option>
+              <option value="ETHEREUM">Ethereum (ERC-20)</option>
+              <option value="ARBITRUM">Arbitrum One</option>
+              <option value="BITCOIN">Bitcoin (Level D)</option>
+            </select>
+          </div>
+          <div class="field-group full-width">
+            <label class="field-label">Suspect / Destination Wallet Address <span class="required">*</span></label>
+            <input type="text" id="f-wallet" class="field-input mono" placeholder="Wallet address reported by victim">
+          </div>
+          <div class="field-group">
+            <label class="field-label">Asset</label>
+            <select id="f-asset" class="field-input">
+              <option value="USDT_TRC20">USDT (TRC-20)</option>
+              <option value="USDT_ERC20">USDT (ERC-20)</option>
+              <option value="USDC_ERC20">USDC (ERC-20)</option>
+              <option value="DAI_ERC20">DAI (ERC-20)</option>
+              <option value="ETH">ETH</option>
+              <option value="TRX">TRX</option>
+            </select>
+          </div>
+          <div class="field-group">
+            <label class="field-label">Reported Amount</label>
+            <input type="text" id="f-amount" class="field-input" placeholder="e.g. 10000.00">
+          </div>
+          <div class="field-group full-width">
+            <label class="field-label">Transaction Hash (Optional Level A Anchor)</label>
+            <input type="text" id="f-tx-hash" class="field-input mono" placeholder="Provides deterministic Level A Anchor if available">
+          </div>
+          <div class="field-group">
+            <label class="field-label">Reported Time (UTC)</label>
+            <input type="datetime-local" id="f-time" class="field-input">
+          </div>
+          <div class="field-group">
+            <label class="field-label">Payment Evidence Reference</label>
+            <input type="text" id="f-evidence" class="field-input" placeholder="e.g. Bank wire ref #998231, payment slip">
+          </div>
+        </div>
+
+        <div class="form-actions" style="justify-content:flex-end;">
+          <button class="btn-ghost" onclick="showSection('cases')">Cancel</button>
+          <button id="btn-submit-complaint" class="btn-primary" onclick="submitComplaint()">Submit & Initiate Deep Tracing</button>
+        </div>
+      </div>
+    </section>
+
+    <!-- ============================
+         SECTION: Cases List
+         ============================ -->
+    <section id="section-cases" class="section">
+      <div class="section-header" style="display:flex; justify-content:space-between; align-items:baseline;">
+        <div>
+          <h1 class="section-title">Active Investigations</h1>
+          <p class="section-sub">Investigator-reviewable case files with multi-hypothesis attribution and snapshot auditing.</p>
+        </div>
+        <button class="btn-secondary" onclick="loadCases()">↻ Refresh</button>
+      </div>
+
+      <div class="cases-table-container">
+        <div id="cases-list">
+          <div class="empty-state">Loading investigations...</div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ============================
+         SECTION: Case Detail & Graph
+         ============================ -->
+    <section id="section-case-detail" class="section hidden">
+      <div class="detail-header" style="display:flex; justify-content:space-between; align-items:center; margin-bottom:16px; padding-bottom:12px; border-bottom:1px solid #dde1e7;">
+        <div style="display:flex; align-items:center; gap:12px;">
+          <button class="btn-ghost-sm" onclick="showSection('cases')">← Back to Cases</button>
+          <h1 class="detail-case-title" id="detail-case-id" style="font-size:16px; font-weight:700; font-family:'IBM Plex Mono', monospace; color:#1a3a5c;">CASE-XXXX</h1>
+          <span id="detail-classification-tag" class="status-badge" style="background:#f1f5f9; color:#475569; font-size:10px;">INVESTIGATION RECORD</span>
+        </div>
+        <div class="detail-actions" style="display:flex; gap:8px;">
+          <button class="btn-secondary" onclick="openAiAnalysis()">Pattern Analysis</button>
+          <button class="btn-secondary" onclick="exportEvidencePackage('markdown')">Export Markdown Report</button>
+          <button class="btn-primary" onclick="exportEvidencePackage('json')">Export Forensic Evidence Package (JSON)</button>
+        </div>
+      </div>
+
+      <div class="detail-layout">
+        <!-- Left: Summary sidebar -->
+        <aside class="detail-sidebar">
+          <div class="summary-block">
+            <div class="summary-label">Complaint Ref</div>
+            <div class="summary-value" id="d-ref" style="font-weight:600;">—</div>
+          </div>
+          <div class="divider"></div>
+
+          <div class="summary-block">
+            <div class="summary-label">Trace Anchor Assessment</div>
+            <div class="anchor-summary" id="d-anchor" style="display:flex; align-items:center; gap:8px; margin:4px 0;">
+              <span id="d-anchor-level" class="level-badge">D</span>
+              <span id="d-anchor-status" class="status-badge">AMBIGUOUS</span>
+            </div>
+            <div class="summary-value mono" id="d-anchor-evidence" style="font-size:11px; word-break:break-all; color:#4b5563;">—</div>
+          </div>
+          <div class="divider"></div>
+
+          <div class="summary-block">
+            <div class="summary-label">Primary Stable VASP</div>
+            <div class="vasp-finding" style="margin-top:2px;">
+              <div class="vasp-name" id="d-primary-vasp" style="font-size:14px;">None identified</div>
+              <div class="vasp-meta" id="d-stability-reason" style="margin-top:4px; font-family:'Inter', sans-serif; color:#6b7280; font-size:11px;">Stability: UNRESOLVED</div>
+            </div>
+          </div>
+          <div class="divider"></div>
+
+          <div class="summary-block">
+            <div class="summary-label">Investigation State</div>
+            <div id="d-state" style="margin-top:4px;">—</div>
+          </div>
+          <div class="divider"></div>
+
+          <div class="summary-block">
+            <div class="summary-label">Completeness & Fragmentation</div>
+            <div id="d-completeness" style="font-size:12px; font-weight:600; color:#166534; margin-top:2px;">100.0% Complete</div>
+            <div id="d-frag-flag" style="font-size:11px; color:#92400e; margin-top:2px;"></div>
+          </div>
+          <div class="divider"></div>
+
+          <div class="summary-block">
+            <div class="summary-label">Graph Overview</div>
+            <div class="graph-stats" id="d-graph-stats" style="font-size:12px; color:#4b5563; display:flex; flex-direction:column; gap:2px; margin-top:4px;">
+              <span>Nodes Traced: <b id="stat-nodes" style="color:#111318;">0</b></span>
+              <span>Transfers: <b id="stat-edges" style="color:#111318;">0</b></span>
+              <span>VASP Endpoints: <b id="stat-vasp" style="color:#111318;">0</b></span>
+            </div>
+          </div>
+        </aside>
+
+        <!-- Right: Tabbed Workspace (Graph, Attributions, Audit, Delta) -->
+        <div class="detail-main">
+          <!-- Workspace sub-navigation -->
+          <div class="workspace-tabs" style="display:flex; gap:4px; margin-bottom:10px; border-bottom:1px solid #dde1e7; padding-bottom:8px;">
+            <button class="tab-btn active" id="tab-btn-graph" onclick="switchCaseTab('graph')">Fund Flow Graph</button>
+            <button class="tab-btn" id="tab-btn-attribution" onclick="switchCaseTab('attribution')">Model Attributions</button>
+            <button class="tab-btn" id="tab-btn-audit" onclick="switchCaseTab('audit')">Branch Traversal Audit</button>
+            <button class="tab-btn" id="tab-btn-delta" onclick="switchCaseTab('delta')">Case Delta</button>
+          </div>
+
+          <!-- TAB 1: Fund Flow Graph -->
+          <div id="tab-view-graph" class="case-tab-pane">
+            <div class="graph-workspace">
+              <div class="graph-toolbar">
+                <span class="graph-toolbar-label">Fund Flow Graph</span>
+                <div class="graph-toolbar-actions">
+                  <button class="btn-ghost-sm" onclick="cy && cy.fit()">Fit</button>
+                  <button class="btn-ghost-sm" onclick="cy && cy.zoom(cy.zoom() * 1.2)">Zoom +</button>
+                  <button class="btn-ghost-sm" onclick="cy && cy.zoom(cy.zoom() * 0.8)">Zoom −</button>
+                </div>
+              </div>
+              <div id="cy" class="cytoscape-container"></div>
+              <div class="graph-legend">
+                <div class="legend-item"><span class="legend-dot victim"></span>Victim anchor</div>
+                <div class="legend-item"><span class="legend-dot suspect"></span>Suspect wallet</div>
+                <div class="legend-item"><span class="legend-dot intermediary"></span>Intermediary</div>
+                <div class="legend-item"><span class="legend-dot vasp"></span>VASP Deposit</div>
+                <div class="legend-item"><span class="legend-dot mixer"></span>Mixer boundary</div>
+                <div class="legend-item"><span class="legend-dot dex"></span>DEX Router</div>
+              </div>
+            </div>
+
+            <!-- Evidence Inspector (appears on tap) -->
+            <div id="evidence-inspector" class="evidence-inspector hidden" style="margin-top:12px;">
+              <div class="inspector-header">
+                <span class="inspector-title">Evidence Inspector</span>
+                <button class="btn-ghost-sm" onclick="closeInspector()">✕</button>
+              </div>
+              <div id="inspector-content" class="inspector-content"></div>
+            </div>
+          </div>
+
+          <!-- TAB 2: Model Attributions Table -->
+          <div id="tab-view-attribution" class="case-tab-pane hidden">
+            <div style="background:#ffffff; border:1px solid #dde1e7; border-radius:6px; padding:16px;">
+              <div style="margin-bottom:12px;">
+                <h3 style="font-size:14px; font-weight:600; color:#1a3a5c;">Multi-Hypothesis Value Attribution Breakdown</h3>
+                <p style="font-size:12px; color:#6b7280; margin-top:2px;">Compares attributed victim value across analytical accounting models. Non-additive across models.</p>
+              </div>
+              <div id="attribution-table-container">
+                <div class="empty-state">Loading model attributions...</div>
+              </div>
+            </div>
+          </div>
+
+          <!-- TAB 3: Branch Traversal Audit Log -->
+          <div id="tab-view-audit" class="case-tab-pane hidden">
+            <div style="background:#ffffff; border:1px solid #dde1e7; border-radius:6px; overflow:hidden;">
+              <div style="padding:12px 16px; background:#f9fafb; border-bottom:1px solid #dde1e7; display:flex; justify-content:space-between; align-items:center;">
+                <div>
+                  <h3 style="font-size:13px; font-weight:600; color:#1a3a5c;">Branch Pruning & Budget Audit Log</h3>
+                  <p style="font-size:11px; color:#6b7280;">Complete record of all evaluated candidate branches, tiers, and dispositions.</p>
+                </div>
+                <span id="audit-count-badge" class="status-badge" style="background:#f3f4f6; color:#4b5563;">0 records</span>
+              </div>
+              <div id="case-audit-content" style="max-height:450px; overflow-y:auto;">
+                <div class="empty-state">Loading audit log...</div>
+              </div>
+            </div>
+          </div>
+
+          <!-- TAB 4: Case Delta View -->
+          <div id="tab-view-delta" class="case-tab-pane hidden">
+            <div style="background:#ffffff; border:1px solid #dde1e7; border-radius:6px; padding:16px;">
+              <div style="margin-bottom:14px;">
+                <h3 style="font-size:14px; font-weight:600; color:#1a3a5c;">Case Delta — Changes Since Last Review</h3>
+                <p style="font-size:12px; color:#6b7280;">Tracks newly observed fund movements, bridge crossings, VASP changes, and state transitions.</p>
+              </div>
+              <div id="case-delta-content">
+                <div class="empty-state">Loading case delta...</div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Pattern Analysis Drawer / Modal (Advisory AI) -->
+          <div id="ai-panel" class="evidence-inspector hidden" style="margin-top:16px; border:1px solid #cbd5e1; border-radius:6px;">
+            <div class="inspector-header" style="background:#f8fafc; padding:12px 16px;">
+              <div style="display:flex; align-items:center; gap:8px;">
+                <span class="inspector-title" style="color:#1e293b; font-weight:700;">Pattern Analysis</span>
+                <span class="status-badge" style="background:#e0f2fe; color:#0369a1; font-size:10px;">ADVISORY ANALYSIS</span>
+              </div>
+              <button class="btn-ghost-sm" onclick="closeAiPanel()">✕</button>
+            </div>
+            <div id="ai-content" class="inspector-content" style="padding:16px;">
+              <!-- Populated by app.js -->
+            </div>
+          </div>
+
+        </div>
+      </div>
+    </section>
+
+    <!-- ============================
+         SECTION: VASP Registry
+         ============================ -->
+    <section id="section-registry" class="section hidden">
+      <div class="section-header">
+        <h1 class="section-title">VASP Attribution Registry</h1>
+        <p class="section-sub">Multi-source intelligence repository with conflict preservation and 180-day staleness tracking.</p>
+      </div>
+
+      <div class="registry-lookup">
+        <div class="field-group">
+          <label class="field-label">Chain</label>
+          <select id="rl-chain" class="field-input" style="width:180px">
+            <option value="TRON">TRON</option>
+            <option value="ETHEREUM">Ethereum</option>
+          </select>
+        </div>
+        <div class="field-group" style="flex:1">
+          <label class="field-label">Address</label>
+          <input type="text" id="rl-address" class="field-input mono" placeholder="Enter wallet address to inspect claims (e.g. 0x28c6c06298d514db089934071355e5743bf21d60)">
+        </div>
+        <button id="btn-lookup-vasp" class="btn-primary" style="margin-top:22px" onclick="lookupAddress()">Look Up</button>
+      </div>
+
+      <div id="registry-result" class="registry-result hidden"></div>
+      <div id="registry-stats" class="registry-stats" style="margin-top:20px;"></div>
+    </section>
+
+    <!-- ============================
+         SECTION: Chain Health
+         ============================ -->
+    <section id="section-health" class="section hidden">
+      <div class="section-header" style="display:flex; justify-content:space-between; align-items:baseline;">
+        <div>
+          <h1 class="section-title">Blockchain Adapter Health & Provider Taxonomy</h1>
+          <p class="section-sub">Real-time status of connected TRON and Ethereum RPC nodes, API credentials, and archival state availability.</p>
+        </div>
+        <button id="btn-refresh-health" class="btn-primary" onclick="loadChainsHealth()">Refresh Health Checks</button>
+      </div>
+
+      <!-- Provider Status Grid -->
+      <div id="health-grid" style="display:grid; grid-template-columns:1fr 1fr; gap:18px; margin-top:16px;">
+        <div class="empty-state" style="grid-column:1 / -1;">Connecting to blockchain providers...</div>
+      </div>
+
+      <!-- Monitor Service Persistence Info -->
+      <div id="monitor-info-card" style="margin-top:20px; background:#ffffff; border:1px solid #dde1e7; border-radius:6px; padding:18px;">
+        <h3 style="font-size:14px; font-weight:600; color:#1a3a5c; margin-bottom:8px;">Case Monitoring Daemon Status</h3>
+        <div id="monitor-details-content" style="font-size:13px; color:#4b5563;">
+          Checking background watcher status...
+        </div>
+      </div>
+    </section>
+
+  </main>
+
+  <script src="/static/js/api.js"></script>
+  <script src="/static/js/graph.js"></script>
+  <script src="/static/js/app.js"></script>
+</body>
+</html>
