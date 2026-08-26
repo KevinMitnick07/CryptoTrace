@@ -129,6 +129,12 @@ def test_api_registry_stats_and_chains_health(client):
     stats = res_reg.json()
     assert "total_entries" in stats
 
+    res_entries = client.get("/api/registry/entries")
+    assert res_entries.status_code == 200
+    entries_data = res_entries.json()
+    assert "entries" in entries_data
+    assert entries_data["count"] >= 10
+
     res_health = client.get("/api/chains/health")
     assert res_health.status_code == 200
     health = res_health.json()

@@ -353,6 +353,7 @@ class DexTransformation:
     input_decimals: int = 18
     output_decimals: int = 18
     is_complete: bool = True
+    legs: list[dict] = field(default_factory=list)
 
 
 @dataclass

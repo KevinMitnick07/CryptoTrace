@@ -15,12 +15,25 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from decimal import Decimal
+from enum import Enum
 from typing import Optional
 import datetime
 
 from ..core.models import Chain, Asset, BridgeEvent, BridgeMatchStrength, EvidenceClass, utc_now
 
 log = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Explicit Match Classification Classes (Phase 17)
+# ---------------------------------------------------------------------------
+
+class BridgeMatchClass(str, Enum):
+    DETERMINISTIC_MESSAGE_MATCH = "DETERMINISTIC_MESSAGE_MATCH"
+    DETERMINISTIC_NONCE_MATCH = "DETERMINISTIC_NONCE_MATCH"
+    STRONG_PROTOCOL_MATCH = "STRONG_PROTOCOL_MATCH"
+    HEURISTIC_AMOUNT_TIME_MATCH = "HEURISTIC_AMOUNT_TIME_MATCH"
+    UNRESOLVED_CROSS_CHAIN = "UNRESOLVED_CROSS_CHAIN"
 
 
 # ---------------------------------------------------------------------------
@@ -91,7 +104,8 @@ class BridgeDestinationCandidate:
     amount: Decimal
     recipient: str
     block_timestamp: datetime.datetime
-    protocol_message_id: Optional[str]   # Canonical ticket ID or nonce if available
+    protocol_message_id: Optional[str] = None   # Canonical ticket ID or message ID
+    nonce: Optional[int] = None                 # Bridge sequence nonce
 
 
 # ---------------------------------------------------------------------------
@@ -124,17 +138,22 @@ def match_bridge_destination(
     source_protocol_message_id: Optional[str],
     candidates: list[BridgeDestinationCandidate],
     bridge_protocol: str = "arbitrum_canonical",
+    source_nonce: Optional[int] = None,
 ) -> BridgeEvent:
     """
     Attempt to match a source-chain bridge deposit to a destination-chain withdrawal.
 
     Match strength hierarchy:
-      STRONG:   Protocol message ID / ticket ID matches exactly (Deterministic).
-      MODERATE: Token + amount (within 2%) + recipient + timing (within 30m).
-      WEAK:     Amount (within 2%) + timing only.
-      NONE:     No candidate matches.
+      STRONG (DETERMINISTIC_MESSAGE_MATCH / DETERMINISTIC_NONCE_MATCH):
+        Protocol message ID, ticket ID, or sequence nonce matches exactly.
+      MODERATE (STRONG_PROTOCOL_MATCH / HEURISTIC_AMOUNT_TIME_MATCH):
+        Token + amount (within 2%) + recipient + timing (within 30m).
+      WEAK (HEURISTIC_AMOUNT_TIME_MATCH):
+        Amount (within 2%) + timing only.
+      NONE (UNRESOLVED_CROSS_CHAIN):
+        No candidate matches.
     """
-    # 1. Deterministic Protocol Ticket/Message ID match (STRONG)
+    # 1. Deterministic Protocol Ticket/Message ID match (DETERMINISTIC_MESSAGE_MATCH)
     if source_protocol_message_id:
         for candidate in candidates:
             if (
@@ -160,11 +179,38 @@ def match_bridge_destination(
                     match_strength=BridgeMatchStrength.STRONG,
                     is_deterministic=True,
                     bridge_fee=fee,
-                    confidence_note="STRONG: Deterministic protocol message identifier confirmed on both chains.",
+                    confidence_note="DETERMINISTIC_MESSAGE_MATCH: Canonical protocol message identifier confirmed on both chains.",
                     ticket_id=source_protocol_message_id,
                 )
 
-    # 2. Heuristic Token + Amount + Recipient + Timing (MODERATE)
+    # 1b. Deterministic Nonce Match (DETERMINISTIC_NONCE_MATCH)
+    if source_nonce is not None:
+        for candidate in candidates:
+            if candidate.nonce is not None and candidate.nonce == source_nonce:
+                fee = source_amount - candidate.amount if source_amount >= candidate.amount else None
+                return BridgeEvent(
+                    source_chain=source_chain,
+                    source_tx_hash=source_tx_hash,
+                    source_address=source_address,
+                    source_asset=source_asset,
+                    source_amount=source_amount,
+                    source_block_timestamp=source_timestamp,
+                    destination_chain=candidate.chain,
+                    destination_tx_hash=candidate.tx_hash,
+                    destination_address=candidate.recipient,
+                    destination_asset=candidate.asset,
+                    destination_amount=candidate.amount,
+                    destination_block_timestamp=candidate.block_timestamp,
+                    protocol=bridge_protocol,
+                    match_method=f"Deterministic Nonce Match (Nonce #{source_nonce})",
+                    match_strength=BridgeMatchStrength.STRONG,
+                    is_deterministic=True,
+                    bridge_fee=fee,
+                    confidence_note="DETERMINISTIC_NONCE_MATCH: Sequence nonce matched deterministically across chain boundaries.",
+                    ticket_id=str(source_nonce),
+                )
+
+    # 2. Heuristic Token + Amount + Recipient + Timing (STRONG_PROTOCOL_MATCH / MODERATE)
     for candidate in candidates:
         if (
             candidate.asset == source_asset
@@ -190,11 +236,11 @@ def match_bridge_destination(
                 match_strength=BridgeMatchStrength.MODERATE,
                 is_deterministic=False,
                 bridge_fee=fee,
-                confidence_note="MODERATE: Cross-chain association based on consistent token, amount, and recipient.",
+                confidence_note="STRONG_PROTOCOL_MATCH: Cross-chain association based on consistent token, amount, and recipient.",
                 ticket_id=None,
             )
 
-    # 3. Weak Amount + Timing match (WEAK)
+    # 3. Weak Amount + Timing match (HEURISTIC_AMOUNT_TIME_MATCH / WEAK)
     for candidate in candidates:
         if (
             _amounts_match(source_amount, candidate.amount)
@@ -219,11 +265,11 @@ def match_bridge_destination(
                 match_strength=BridgeMatchStrength.WEAK,
                 is_deterministic=False,
                 bridge_fee=fee,
-                confidence_note="WEAK: Association based only on amount and timing. Cannot be used as deterministic evidence.",
+                confidence_note="HEURISTIC_AMOUNT_TIME_MATCH: Statistical association based only on amount and timing. Cannot be used as deterministic evidence.",
                 ticket_id=None,
             )
 
-    # 4. No match found
+    # 4. No match found (UNRESOLVED_CROSS_CHAIN / NONE)
     return BridgeEvent(
         source_chain=source_chain,
         source_tx_hash=source_tx_hash,
@@ -242,6 +288,6 @@ def match_bridge_destination(
         match_strength=BridgeMatchStrength.NONE,
         is_deterministic=False,
         bridge_fee=None,
-        confidence_note="NONE: Destination transaction has not occurred or candidate data unavailable.",
+        confidence_note="UNRESOLVED_CROSS_CHAIN: Destination transaction has not occurred or candidate data unavailable.",
         ticket_id=None,
     )
