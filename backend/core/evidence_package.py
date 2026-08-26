@@ -1,7 +1,7 @@
 """
 Forensic Evidence Package Generator.
 
-Produces exportable, court-defensible investigation packages in JSON and Markdown
+Produces exportable forensic investigation packages in JSON and Markdown
 formats with cryptographic SHA-256 integrity hashes.
 """
 
@@ -33,9 +33,19 @@ def _decimal_default(obj: Any) -> Any:
 
 class EvidencePackageGenerator:
 
-    def __init__(self, case: InvestigationCase, investigator_id: str = "INVESTIGATOR-001"):
+    def __init__(
+        self,
+        case: InvestigationCase,
+        investigator_id: str = "INVESTIGATOR-001",
+        candidate_infrastructure: Optional[dict] = None,
+        intermediary_analysis: Optional[dict] = None,
+        alert_history: Optional[list[dict]] = None,
+    ):
         self.case = case
         self.investigator_id = investigator_id
+        self.candidate_infrastructure = candidate_infrastructure
+        self.intermediary_analysis = intermediary_analysis
+        self.alert_history = alert_history or []
         self._cached_package: Optional[dict] = None
 
     def build_package_dict(self) -> dict:
@@ -195,6 +205,9 @@ class EvidencePackageGenerator:
                     if self.case.primary_stable_vasp else None
                 ),
             },
+            "candidate_infrastructure": self.candidate_infrastructure,
+            "intermediary_analysis": self.intermediary_analysis,
+            "alert_history": self.alert_history,
             "investigator_action_packet": action_packet,
             "hop_chronology": hops_data,
             "vasp_attributions": vasp_data,
@@ -217,8 +230,9 @@ class EvidencePackageGenerator:
         package_hash = hashlib.sha256(canonical_str.encode("utf-8")).hexdigest()
 
         sanitized["metadata"]["package_integrity_sha256"] = package_hash
-        self._cached_package = sanitized
-        return sanitized
+        safe_dict = json.loads(json.dumps(sanitized, default=_decimal_default))
+        self._cached_package = safe_dict
+        return safe_dict
 
     def export_json(self, indent: int = 2) -> str:
         pkg = self.build_package_dict()
@@ -232,6 +246,9 @@ class EvidencePackageGenerator:
         summary = pkg["trace_summary"]
         prim_vasp = pkg["primary_identified_vasp"]
         action = pkg.get("investigator_action_packet", {})
+        cand_infra = pkg.get("candidate_infrastructure")
+        intermediary = pkg.get("intermediary_analysis")
+        alerts = pkg.get("alert_history", [])
 
         md = []
         md.append("# FORENSIC BLOCKCHAIN EVIDENCE PACKAGE")
@@ -283,7 +300,36 @@ class EvidencePackageGenerator:
             md.append("No VASP entities attributed in path.")
         md.append("")
 
-        md.append("## 5. Audited Branch Budget & Pruning Log")
+        if cand_infra:
+            md.append("## 5. Candidate Exchange Infrastructure (Heuristic Inference)")
+            md.append(f"- **Inferred Entity:** `{cand_infra.get('candidate_entity') or 'Unresolved'}`")
+            md.append(f"- **Inferred Role:** `{cand_infra.get('candidate_role')}` | **Inference Strength:** `{cand_infra.get('inference_strength')}`")
+            md.append(f"- **Victim-Linked:** `{'YES' if cand_infra.get('is_victim_linked') else 'NO (Contextual Topology Only)'}`")
+            if cand_infra.get('victim_value'):
+                vv = cand_infra['victim_value']
+                md.append(f"- **Attributed Value Bounds:** `[{vv.get('min')}, {vv.get('max')}] {vv.get('asset')}`")
+            md.append(f"- **Explanation:** {cand_infra.get('explanation')}\n")
+
+        if intermediary and intermediary.get("pattern_findings"):
+            md.append("## 6. Intermediary Movement Pattern Analysis")
+            md.append(f"- **Dominant Dwell Time:** `{intermediary.get('dominant_dwell_class')}` | **Total Hops:** `{intermediary.get('total_hops')}`")
+            md.append(f"- **Fan-Out Hubs:** `{intermediary.get('fan_out_count')}` | **Fan-In Hubs:** `{intermediary.get('fan_in_count')}`")
+            md.append("| Pattern Type | Observed Addresses | Evidence Class | Details |")
+            md.append("| :--- | :--- | :--- | :--- |")
+            for p in intermediary.get("pattern_findings", []):
+                addrs_str = ", ".join([f"`{a[:8]}...`" for a in p.get("addresses", [])[:3]])
+                md.append(f"| `{p.get('pattern_type')}` | {addrs_str} | `{p.get('evidence_class')}` | {p.get('description')} |")
+            md.append("")
+
+        if alerts:
+            md.append("## 7. Monitoring Alert Transition History")
+            md.append("| Alert ID | Event Type | Severity | Summary | Timestamp |")
+            md.append("| :--- | :--- | :--- | :--- | :--- |")
+            for a in alerts[:10]:
+                md.append(f"| `{a.get('alert_id')}` | `{a.get('event_type')}` | `{a.get('severity')}` | {a.get('summary', '')[:40]}... | {a.get('created_at')} |")
+            md.append("")
+
+        md.append("## 8. Audited Branch Budget & Pruning Log")
         md.append(f"Total Branch Decisions Audited: **{len(pkg['branch_audit_log'])}**")
         md.append("| From | To | TX | Amount | Disposition | Reason | Tier |")
         md.append("| :--- | :--- | :--- | :--- | :--- | :--- | :--- |")
@@ -297,11 +343,11 @@ class EvidencePackageGenerator:
         md.append("")
 
         if action:
-            md.append("## 6. Investigator Action Packet")
+            md.append("## 9. Investigator Action Packet (Advisory)")
             md.append(f"- **Primary Actionable Endpoint:** `{action.get('primary_supported_vasp') or 'None identified'}`")
             md.append(f"- **Target Wallet:** `{action.get('target_address') or '—'}`")
             md.append(f"- **Stability Tier:** `{action.get('endpoint_stability')}` | **Actionability:** `{action.get('actionability_state')}`")
-            md.append("- **Suggested Record Categories for Authorized Request:**")
+            md.append("- **Suggested Record Categories for Authorized Legal Request:**")
             for cat in action.get("suggested_record_categories", []):
                 md.append(f"  - {cat}")
             md.append(f"\n> **Advisory Notice:** {action.get('advisory_notice')}\n")
@@ -311,7 +357,8 @@ class EvidencePackageGenerator:
         md.append(
             "> Multi-hypothesis attributions represent mathematical bounds under explicit analytical assumptions. "
             "Attribution intervals are not additive across models. "
-            "Cryptographic SHA-256 package hash guarantees evidence record integrity."
+            "Cryptographic SHA-256 package hash guarantees evidence record integrity. "
+            "Human and authorized legal review required prior to lawful process."
         )
 
         return "\n".join(md)

@@ -47,7 +47,7 @@ class VaspRegistry:
         # Index: (chain_value, address_lower) → list[VaspRecord]
         self._index: dict[tuple[str, str], list[VaspRecord]] = {}
         if isinstance(label_data, dict):
-            records = label_data.get("records", [])
+            records = label_data.get("entries", label_data.get("records", []))
         else:
             records = label_data
         self._load(records)
@@ -206,6 +206,42 @@ class VaspRegistry:
     def is_stale_record(self, record: VaspRecord) -> bool:
         return record.is_stale(STALE_THRESHOLD_DAYS)
 
+    def list_all_records(self) -> list[dict]:
+        """Return all known entity claims formatted for forensic intelligence browsing."""
+        records = []
+        for (chain_val, addr), claims in self._index.items():
+            for c in claims:
+                first_role = c.entity_role.lower()
+                if "mixer" in first_role or self.is_mixer(c.chain, c.address):
+                    etype = "MIXER"
+                elif "dex" in first_role or "router" in first_role or "pool" in first_role:
+                    etype = "DEX"
+                elif "bridge" in first_role:
+                    etype = "BRIDGE"
+                elif "foundation" in first_role or "treasury" in first_role:
+                    etype = "FOUNDATION"
+                else:
+                    etype = "CUSTODIAL_VASP"
+
+                records.append({
+                    "address": c.address,
+                    "chain": c.chain.value if hasattr(c.chain, "value") else str(c.chain),
+                    "entity_name": c.entity_name,
+                    "entity_role": c.entity_role,
+                    "entity_type": etype,
+                    "source": c.source.value if hasattr(c.source, "value") else str(c.source),
+                    "source_reliability": c.source_reliability,
+                    "confidence": c.confidence.value if hasattr(c.confidence, "value") else str(c.confidence),
+                    "first_observed": c.first_observed.isoformat() if c.first_observed else None,
+                    "last_verified": c.last_verified.isoformat() if c.last_verified else None,
+                    "is_stale": c.is_stale(STALE_THRESHOLD_DAYS),
+                    "is_active": c.is_active,
+                    "independent_corroboration": c.independent_corroboration,
+                    "notes": c.notes,
+                })
+        records.sort(key=lambda r: (r["chain"], r["entity_name"]))
+        return records
+
     def stats(self) -> dict:
         total_claims = sum(len(c) for c in self._index.values())
         stale_count = 0
@@ -223,8 +259,11 @@ class VaspRegistry:
 def load_registry_from_file(filepath: str) -> VaspRegistry:
     with open(filepath, "r", encoding="utf-8") as f:
         data = json.load(f)
-    if isinstance(data, dict) and "records" in data:
-        data = data["records"]
+    if isinstance(data, dict):
+        if "entries" in data:
+            data = data["entries"]
+        elif "records" in data:
+            data = data["records"]
     return VaspRegistry(data)
 
 

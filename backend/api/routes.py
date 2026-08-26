@@ -49,6 +49,8 @@ from ..ai.patterns import AdvisoryPatternClassifier
 from ..ai.similarity import CaseSimilarityEngine
 from ..ai.summary import generate_investigator_narrative
 from ..vasp.registry import VaspRegistry, load_registry_from_file, make_vasp_lookup_fn, make_mixer_fn
+from ..vasp.clustering import ExchangeInfrastructureClusteringEngine
+from ..core.intermediary import IntermediaryAnalysisEngine
 from ..chains.tron import TronAdapter
 from ..chains.ethereum import EthereumAdapter
 from ..storage.store import InvestigationStore
@@ -112,7 +114,29 @@ CONVERGENCE_ANALYZER: Optional[CaseConvergenceAnalyzer] = None
 CASE_MACHINES: dict[str, CaseStateMachine] = {}
 INVESTIGATION_CASES: dict[str, InvestigationCase] = {}
 MONITOR_SERVICE: Optional[CaseMonitorService] = None
+CLUSTERING_ENGINE: Optional[ExchangeInfrastructureClusteringEngine] = None
+INTERMEDIARY_ENGINE: Optional[IntermediaryAnalysisEngine] = None
 HISTORICAL_CORPUS: list[dict] = []
+
+
+class SimpleRateLimiter:
+    """Lightweight in-memory rate limiter for public endpoints."""
+    def __init__(self, max_requests: int = 120, window_seconds: int = 60):
+        self._max = max_requests
+        self._window = window_seconds
+        self._requests: dict[str, list[float]] = {}
+
+    def check(self, client_id: str) -> bool:
+        now = datetime.datetime.now(datetime.timezone.utc).timestamp()
+        timestamps = self._requests.setdefault(client_id, [])
+        self._requests[client_id] = [ts for ts in timestamps if now - ts < self._window]
+        if len(self._requests[client_id]) >= self._max:
+            return False
+        self._requests[client_id].append(now)
+        return True
+
+
+RATE_LIMITER = SimpleRateLimiter(max_requests=120, window_seconds=60)
 
 
 def verify_auth_token(authorization: Optional[str] = Header(None), x_api_key: Optional[str] = Header(None)):
@@ -132,7 +156,8 @@ def verify_auth_token(authorization: Optional[str] = Header(None), x_api_key: Op
 
 @app.on_event("startup")
 async def startup():
-    global VASP_REGISTRY, STORE, ADAPTERS, CONVERGENCE_ANALYZER, MONITOR_SERVICE, HISTORICAL_CORPUS
+    global VASP_REGISTRY, STORE, ADAPTERS, CONVERGENCE_ANALYZER, MONITOR_SERVICE
+    global CLUSTERING_ENGINE, INTERMEDIARY_ENGINE, HISTORICAL_CORPUS
 
     registry_path = os.getenv(
         "VASP_REGISTRY_PATH",
@@ -147,10 +172,17 @@ async def startup():
     STORE = InvestigationStore(db_path)
     CONVERGENCE_ANALYZER = CaseConvergenceAnalyzer(VASP_REGISTRY)
 
+    CLUSTERING_ENGINE = ExchangeInfrastructureClusteringEngine(
+        known_vasp_lookup_fn=make_vasp_lookup_fn(VASP_REGISTRY) if VASP_REGISTRY else None
+    )
+    INTERMEDIARY_ENGINE = IntermediaryAnalysisEngine()
+
     MONITOR_SERVICE = CaseMonitorService(
         store=STORE,
         adapter_registry=ADAPTERS,
         poll_interval_seconds=int(os.getenv("CASE_MONITOR_INTERVAL_SECONDS", "60")),
+        vasp_lookup_fn=make_vasp_lookup_fn(VASP_REGISTRY) if VASP_REGISTRY else None,
+        mixer_lookup_fn=make_mixer_fn(VASP_REGISTRY) if VASP_REGISTRY else None,
     )
     MONITOR_SERVICE.start()
 
@@ -518,6 +550,93 @@ async def get_case_detail(case_id: str):
     }
 
 
+@app.get("/api/cases/{case_id}/clustering")
+async def get_case_clustering(case_id: str):
+    """Candidate exchange infrastructure clustering hypothesis for case endpoint."""
+    inv_case = INVESTIGATION_CASES.get(case_id)
+    if not inv_case:
+        case_row = STORE.get_case(case_id) if STORE else None
+        if not case_row:
+            raise HTTPException(status_code=404, detail="Case not found")
+        transfers = []
+        audit = STORE.get_branch_audit(case_id) if STORE else []
+        for r in audit:
+            transfers.append(OnChainTransfer(
+                tx_hash=r.get("tx_hash", "0x"),
+                chain=Chain(r.get("chain", "TRON")) if r.get("chain") in Chain._value2member_map_ else Chain.TRON,
+                asset=Asset(r.get("asset", "USDT_TRC20")) if r.get("asset") in Asset._value2member_map_ else Asset.USDT_TRC20,
+                amount=Decimal(r.get("amount", "0")),
+                from_address=r.get("from_address", ""),
+                to_address=r.get("to_address", ""),
+                block_number=0,
+                block_timestamp=utc_now(),
+                tx_state=TxState.CONFIRMED,
+            ))
+        target_addr = case_row.get("reported_wallet", "")
+        chain = Chain(case_row.get("anchor_chain", "TRON")) if case_row.get("anchor_chain") in Chain._value2member_map_ else Chain.TRON
+        v_amount = Decimal(case_row.get("victim_value", "0"))
+        v_asset = Asset(case_row.get("anchor_asset", "USDT_TRC20")) if case_row.get("anchor_asset") in Asset._value2member_map_ else Asset.USDT_TRC20
+        v_interval = ValueInterval(v_amount, v_amount, v_asset) if v_amount > Decimal(0) else None
+
+        hyp = CLUSTERING_ENGINE.analyze_address_cluster(
+            target_addr, chain, transfers,
+            victim_value_interval=v_interval,
+            trace_completeness=100.0,
+            endpoint_stability=case_row.get("actionability", "UNRESOLVED"),
+        ) if CLUSTERING_ENGINE else None
+        return hyp.to_dict() if hyp else {"status": "UNAVAILABLE"}
+
+    transfers = [seg.transfer for seg in inv_case.path_segments if seg.transfer]
+    target_addr = inv_case.complaint.reported_wallet
+    chain = inv_case.complaint.reported_chain or Chain.TRON
+    v_interval = (
+        inv_case.primary_stable_vasp.victim_value_interval
+        if inv_case.primary_stable_vasp
+        else inv_case.unresolved_value
+    )
+    last_seg = inv_case.path_segments[-1] if inv_case.path_segments else None
+    v_models = last_seg.victim_value_by_model if last_seg else None
+
+    hyp = CLUSTERING_ENGINE.analyze_address_cluster(
+        target_addr, chain, transfers,
+        victim_value_interval=v_interval,
+        victim_value_by_model=v_models,
+        trace_completeness=inv_case.trace_completeness_pct,
+        deferred_value=inv_case.deferred_value.upper_bound if inv_case.deferred_value else None,
+        unresolved_value=inv_case.unresolved_value.upper_bound if inv_case.unresolved_value else None,
+        endpoint_stability=inv_case.primary_stable_vasp.endpoint_stability.value if inv_case.primary_stable_vasp else None,
+    ) if CLUSTERING_ENGINE else None
+    return hyp.to_dict() if hyp else {"status": "UNAVAILABLE"}
+
+
+@app.get("/api/cases/{case_id}/intermediary")
+async def get_case_intermediary_analysis(case_id: str):
+    """Intermediary laundering pattern, dwell time, and fan-out/fan-in analysis."""
+    inv_case = INVESTIGATION_CASES.get(case_id)
+    transfers = []
+    v_interval = None
+    if inv_case:
+        transfers = [seg.transfer for seg in inv_case.path_segments if seg.transfer]
+        v_interval = inv_case.unresolved_value or (inv_case.primary_stable_vasp.victim_value_interval if inv_case.primary_stable_vasp else None)
+    elif STORE:
+        audit = STORE.get_branch_audit(case_id)
+        for r in audit:
+            transfers.append(OnChainTransfer(
+                tx_hash=r.get("tx_hash", "0x"),
+                chain=Chain(r.get("chain", "TRON")) if r.get("chain") in Chain._value2member_map_ else Chain.TRON,
+                asset=Asset(r.get("asset", "USDT_TRC20")) if r.get("asset") in Asset._value2member_map_ else Asset.USDT_TRC20,
+                amount=Decimal(r.get("amount", "0")),
+                from_address=r.get("from_address", ""),
+                to_address=r.get("to_address", ""),
+                block_number=0,
+                block_timestamp=utc_now(),
+                tx_state=TxState.CONFIRMED,
+            ))
+
+    res = INTERMEDIARY_ENGINE.analyze_transfers(case_id, transfers, victim_value_interval=v_interval) if INTERMEDIARY_ENGINE else None
+    return res.to_dict() if res else {"case_id": case_id, "summary_notes": ["Engine uninitialized"]}
+
+
 @app.get("/api/cases/{case_id}/graph")
 async def get_case_graph(case_id: str):
     """Retrieve Cytoscape graph nodes and edges for an investigation case."""
@@ -712,12 +831,63 @@ async def get_case_attributions(case_id: str):
     return {"case_id": case_id, "attributions": list(dest_models.values())}
 
 
+def _build_evidence_package_generator(case_id: str, inv_case: InvestigationCase) -> EvidencePackageGenerator:
+    transfers = [seg.transfer for seg in inv_case.path_segments if seg.transfer]
+    if not transfers and STORE:
+        audit = STORE.get_branch_audit(case_id)
+        for r in audit:
+            transfers.append(OnChainTransfer(
+                tx_hash=r.get("tx_hash", "0x"),
+                chain=Chain(r.get("chain", "TRON")) if r.get("chain") in Chain._value2member_map_ else Chain.TRON,
+                asset=Asset(r.get("asset", "USDT_TRC20")) if r.get("asset") in Asset._value2member_map_ else Asset.USDT_TRC20,
+                amount=Decimal(r.get("amount", "0")),
+                from_address=r.get("from_address", ""),
+                to_address=r.get("to_address", ""),
+                block_number=0,
+                block_timestamp=utc_now(),
+                tx_state=TxState.CONFIRMED,
+            ))
+
+    target_addr = inv_case.complaint.reported_wallet
+    chain = inv_case.complaint.reported_chain or Chain.TRON
+    v_interval = (
+        inv_case.primary_stable_vasp.victim_value_interval
+        if inv_case.primary_stable_vasp
+        else inv_case.unresolved_value
+    )
+    last_seg = inv_case.path_segments[-1] if inv_case.path_segments else None
+    v_models = last_seg.victim_value_by_model if last_seg else None
+
+    cand_infra = CLUSTERING_ENGINE.analyze_address_cluster(
+        target_addr, chain, transfers,
+        victim_value_interval=v_interval,
+        victim_value_by_model=v_models,
+        trace_completeness=inv_case.trace_completeness_pct,
+        deferred_value=inv_case.deferred_value.upper_bound if inv_case.deferred_value else None,
+        unresolved_value=inv_case.unresolved_value.upper_bound if inv_case.unresolved_value else None,
+        endpoint_stability=inv_case.primary_stable_vasp.endpoint_stability.value if inv_case.primary_stable_vasp else None,
+    ).to_dict() if CLUSTERING_ENGINE else None
+
+    intermediary = INTERMEDIARY_ENGINE.analyze_transfers(
+        case_id, transfers, victim_value_interval=v_interval
+    ).to_dict() if INTERMEDIARY_ENGINE else None
+
+    alerts = STORE.get_alerts(case_id) if STORE else []
+
+    return EvidencePackageGenerator(
+        case=inv_case,
+        candidate_infrastructure=cand_infra,
+        intermediary_analysis=intermediary,
+        alert_history=alerts,
+    )
+
+
+@app.get("/api/cases/{case_id}/evidence-package")
 @app.get("/api/cases/{case_id}/evidence-package/json")
 async def export_evidence_package_json(case_id: str):
-    """Download evidence-oriented Forensic Evidence Package in JSON format with SHA-256."""
+    """Download court-ready, evidence-oriented Forensic Evidence Package in JSON format."""
     inv_case = INVESTIGATION_CASES.get(case_id)
     if not inv_case:
-        # Fallback to reconstructing from SQLite
         case_row = STORE.get_case(case_id)
         if not case_row:
             raise HTTPException(status_code=404, detail="Case not found")
@@ -746,7 +916,7 @@ async def export_evidence_package_json(case_id: str):
             unresolved_value=ValueInterval(intake.reported_amount or Decimal(0), intake.reported_amount or Decimal(0), intake.reported_asset or Asset.USDT_ERC20),
         )
 
-    generator = EvidencePackageGenerator(inv_case)
+    generator = _build_evidence_package_generator(case_id, inv_case)
     package_dict = generator.build_package_dict()
     return JSONResponse(content=package_dict)
 
@@ -784,7 +954,7 @@ async def export_evidence_package_markdown(case_id: str):
             unresolved_value=ValueInterval(intake.reported_amount or Decimal(0), intake.reported_amount or Decimal(0), intake.reported_asset or Asset.USDT_ERC20),
         )
 
-    generator = EvidencePackageGenerator(inv_case)
+    generator = _build_evidence_package_generator(case_id, inv_case)
     md = generator.export_markdown()
     return PlainTextResponse(content=md, media_type="text/markdown")
 
@@ -1220,6 +1390,15 @@ async def registry_stats():
     if not VASP_REGISTRY:
         return {}
     return VASP_REGISTRY.stats()
+
+
+@app.get("/api/registry/entries")
+async def registry_entries():
+    """List all registered known entity claims for intelligence browsing."""
+    if not VASP_REGISTRY:
+        return {"entries": [], "count": 0}
+    entries = VASP_REGISTRY.list_all_records()
+    return {"entries": entries, "count": len(entries)}
 
 
 # ---------------------------------------------------------------------------

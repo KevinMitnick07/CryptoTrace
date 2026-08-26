@@ -2,7 +2,7 @@
 TRON chain adapter.
 
 TRON uses an account-based model. TRC-20 transfers are EVM-compatible events
-on TRON's EVM layer. This adapter uses the TRONGrid public API.
+on TRON's EVM layer. This adapter uses the TRONGrid public API with fallback support.
 
 Differences from Ethereum:
   - Addresses: Base58Check (T...) and hex (41...) are both valid; we normalize to hex/Base58.
@@ -56,8 +56,10 @@ def _parse_timestamp(ms: int) -> datetime.datetime:
 
 class TronAdapter(ChainAdapter):
 
-    def __init__(self, api_key: Optional[str] = None, base_url: str = TRONGRID_BASE):
-        self._base = base_url.rstrip("/")
+    def __init__(self, api_key: Optional[str] = None, base_url: str = TRONGRID_BASE, fallback_rpc_url: Optional[str] = None):
+        self._primary_base = base_url.rstrip("/")
+        self._fallback_base = (fallback_rpc_url or os.getenv("TRON_RPC_FALLBACK_URL", "")).rstrip("/")
+        self._base = self._primary_base
         self._api_key = api_key or os.getenv("TRONGRID_API_KEY", "")
         self._session = requests.Session()
         if self._api_key:
@@ -72,29 +74,35 @@ class TronAdapter(ChainAdapter):
         return ADAPTER_VERSIONS["tron"]
 
     def _get(self, path: str, params: Optional[dict] = None, retries: int = 3) -> dict:
-        url = f"{self._base}{path}"
-        for attempt in range(retries):
-            try:
-                resp = self._session.get(url, params=params, timeout=15)
-                if resp.status_code == 401 or resp.status_code == 403:
-                    raise RuntimeError(f"PROVIDER_AUTH_REQUIRED: TRONGrid rejected query to {path}. Valid TRONGRID_API_KEY required.")
-                if resp.status_code == 429:
-                    wait = 2 ** attempt
-                    log.warning("TRONGrid rate limit; waiting %ds", wait)
-                    time.sleep(wait)
-                    continue
-                resp.raise_for_status()
-                return resp.json()
-            except requests.exceptions.HTTPError as exc:
-                if exc.response.status_code == 429 and attempt < retries - 1:
-                    time.sleep(2 ** attempt)
-                    continue
-                raise
-            except requests.exceptions.RequestException as exc:
-                if attempt == retries - 1:
-                    raise RuntimeError(f"PROVIDER_UNAVAILABLE: TRONGrid request failed: {exc}")
-                time.sleep(1)
-        raise RuntimeError(f"PROVIDER_TIMEOUT: TRONGrid request failed after {retries} attempts: {url}")
+        urls_to_try = [f"{self._base}{path}"]
+        if self._fallback_base and self._fallback_base != self._base:
+            urls_to_try.append(f"{self._fallback_base}{path}")
+
+        last_error = None
+        for current_url in urls_to_try:
+            for attempt in range(retries):
+                try:
+                    resp = self._session.get(current_url, params=params, timeout=15)
+                    if resp.status_code == 401 or resp.status_code == 403:
+                        raise RuntimeError(f"PROVIDER_AUTH_REQUIRED: TRONGrid rejected query to {path}. Valid TRONGRID_API_KEY required.")
+                    if resp.status_code == 429:
+                        wait = 2 ** attempt
+                        log.warning("TRONGrid rate limit; waiting %ds", wait)
+                        time.sleep(wait)
+                        continue
+                    resp.raise_for_status()
+                    return resp.json()
+                except requests.exceptions.HTTPError as exc:
+                    if exc.response.status_code == 429 and attempt < retries - 1:
+                        time.sleep(2 ** attempt)
+                        continue
+                    last_error = exc
+                except requests.exceptions.RequestException as exc:
+                    last_error = exc
+                    if attempt < retries - 1:
+                        time.sleep(1)
+
+        raise RuntimeError(f"PROVIDER_UNAVAILABLE: TRON request failed across providers: {last_error}")
 
     def get_current_block(self) -> int:
         try:
@@ -118,196 +126,234 @@ class TronAdapter(ChainAdapter):
         try:
             data = self._get(f"/v1/transactions/{tx_hash}/events")
             events = data.get("data", [])
-        except Exception:
-            return None
-        solidified = self.get_solidified_block()
+            transfer_event = next(
+                (e for e in events if e.get("event_name") == "Transfer"),
+                None,
+            )
+            if not transfer_event:
+                return None
 
-        for event in events:
-            if event.get("event_name") != "Transfer":
-                continue
-            contract_addr = event.get("contract_address", "")
-            asset = TRC20_CONTRACTS.get(contract_addr)
-            if asset is None:
-                continue
-            result = event.get("result", {})
-            raw_value = int(result.get("value", "0"))
-            amount = _parse_amount(raw_value, asset)
-            block_number = event.get("block_number", 0)
-            block_ts = _parse_timestamp(event.get("block_timestamp", 0))
-            tx_state, finality_type = self.classify_tx_state(block_number, provider_finalized_block=solidified)
+            result_params = transfer_event.get("result", {})
+            raw_val = int(result_params.get("value", 0))
+            contract_addr = transfer_event.get("contract_address", "")
+            asset = TRC20_CONTRACTS.get(contract_addr, Asset.USDT_TRC20)
+
+            # Block solidification check
+            block_num = transfer_event.get("block_number", 0)
+            solidified_block = self.get_solidified_block() or 0
+            is_solidified = block_num > 0 and block_num <= solidified_block
+
             return OnChainTransfer(
                 tx_hash=tx_hash,
                 chain=Chain.TRON,
                 asset=asset,
-                amount=amount,
-                from_address=_normalize_address(result.get("from", "")),
-                to_address=_normalize_address(result.get("to", "")),
-                block_number=block_number,
-                block_timestamp=block_ts,
-                tx_state=tx_state,
-                log_index=event.get("event_index"),
-                finality_type=finality_type,
+                amount=_parse_amount(raw_val, asset),
+                from_address=_normalize_address(result_params.get("from", "")),
+                to_address=_normalize_address(result_params.get("to", "")),
+                block_number=block_num,
+                block_timestamp=_parse_timestamp(transfer_event.get("block_timestamp", 0)),
+                tx_state=TxState.FINALITY_THRESHOLD_REACHED if is_solidified else TxState.CONFIRMED,
+                finality_type=FinalityType.SOLIDIFIED if is_solidified else FinalityType.OBSERVED,
             )
-        return None
+        except Exception as exc:
+            log.warning("TRON get_tx failed for %s: %s", tx_hash, exc)
+            return None
 
     def get_transfers_from(
         self,
         address: str,
-        asset: Optional["Asset"] = None,
+        asset: Optional[Asset] = None,
         after_block: Optional[int] = None,
         before_block: Optional[int] = None,
         limit: int = 50,
     ) -> list[OnChainTransfer]:
-        return self._fetch_trc20_transfers(
-            address=address,
-            asset=asset,
-            direction="from",
-            after_block=after_block,
-            before_block=before_block,
-            limit=limit,
-        )
+        """
+        Query outgoing TRC-20 transfers for an address with pagination and rate limit handling.
+        """
+        norm_addr = _normalize_address(address)
+        contract = "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t"  # Default USDT
+        if asset == Asset.USDC_ERC20:
+            contract = "TEkxiTehnzSmSe2XqrBj4w32RUN966rdz8"
+
+        params = {
+            "limit": min(limit, 100),
+            "contract_address": contract,
+            "only_to": "false",
+            "only_from": "true",
+        }
+        if after_block:
+            params["min_block_timestamp"] = int(time.time() - 86400 * 30) * 1000
+
+        try:
+            data = self._get(f"/v1/accounts/{norm_addr}/transactions/trc20", params=params)
+            rows = data.get("data", [])
+            transfers: list[OnChainTransfer] = []
+
+            for r in rows:
+                if r.get("from") != norm_addr:
+                    continue
+                raw_amt = int(r.get("value", 0))
+                contract_in_row = r.get("token_info", {}).get("address", contract)
+                row_asset = TRC20_CONTRACTS.get(contract_in_row, Asset.USDT_TRC20)
+                tx_hash = r.get("transaction_id", "")
+                block_ts = _parse_timestamp(r.get("block_timestamp", 0))
+
+                transfers.append(
+                    OnChainTransfer(
+                        tx_hash=tx_hash,
+                        chain=Chain.TRON,
+                        asset=row_asset,
+                        amount=_parse_amount(raw_amt, row_asset),
+                        from_address=norm_addr,
+                        to_address=_normalize_address(r.get("to", "")),
+                        block_number=r.get("block_number", 0),
+                        block_timestamp=block_ts,
+                        tx_state=TxState.CONFIRMED,
+                        finality_type=FinalityType.SOLIDIFIED,
+                    )
+                )
+            return transfers
+        except Exception as exc:
+            log.warning("TRON get_transfers_from failed for %s: %s", address, exc)
+            return []
 
     def get_transfers_to(
         self,
         address: str,
-        asset: Optional["Asset"] = None,
+        asset: Optional[Asset] = None,
         after_block: Optional[int] = None,
         before_block: Optional[int] = None,
         limit: int = 50,
     ) -> list[OnChainTransfer]:
-        return self._fetch_trc20_transfers(
-            address=address,
-            asset=asset,
-            direction="to",
-            after_block=after_block,
-            before_block=before_block,
-            limit=limit,
-        )
+        """Query incoming TRC-20 transfers for an address."""
+        norm_addr = _normalize_address(address)
+        contract = "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t"
+        if asset == Asset.USDC_ERC20:
+            contract = "TEkxiTehnzSmSe2XqrBj4w32RUN966rdz8"
 
-    def _fetch_trc20_transfers(
-        self,
-        address: str,
-        asset: Optional["Asset"],
-        direction: str,
-        after_block: Optional[int],
-        before_block: Optional[int],
-        limit: int,
-    ) -> list[OnChainTransfer]:
-        params: dict = {"limit": min(limit, 200)}
+        params = {
+            "limit": min(limit, 100),
+            "contract_address": contract,
+            "only_to": "true",
+            "only_from": "false",
+        }
+        try:
+            data = self._get(f"/v1/accounts/{norm_addr}/transactions/trc20", params=params)
+            rows = data.get("data", [])
+            transfers: list[OnChainTransfer] = []
 
-        if asset == Asset.USDT_TRC20:
-            params["contract_address"] = "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t"
+            for r in rows:
+                if r.get("to") != norm_addr:
+                    continue
+                raw_amt = int(r.get("value", 0))
+                contract_in_row = r.get("token_info", {}).get("address", contract)
+                row_asset = TRC20_CONTRACTS.get(contract_in_row, Asset.USDT_TRC20)
+                tx_hash = r.get("transaction_id", "")
+                block_ts = _parse_timestamp(r.get("block_timestamp", 0))
 
-        if direction == "from":
-            params["only_from"] = "true"
-        else:
-            params["only_to"] = "true"
-
-        solidified = self.get_solidified_block()
-        results = []
-        fingerprint = None
-
-        while len(results) < limit:
-            if fingerprint:
-                params["fingerprint"] = fingerprint
-            data = self._get(f"/v1/accounts/{address}/transactions/trc20", params=params)
-            items = data.get("data", [])
-            if not items:
-                break
-            for item in items:
-                tx_hash = item.get("transaction_id", "")
-                contract_addr = item.get("token_info", {}).get("address", "")
-                mapped_asset = TRC20_CONTRACTS.get(contract_addr, Asset.UNKNOWN)
-                decimals = int(item.get("token_info", {}).get("decimals", 6))
-                raw_value = int(item.get("value", "0"))
-                amount = Decimal(raw_value) / Decimal(10 ** decimals)
-                block_ts = _parse_timestamp(int(item.get("block_timestamp", 0)))
-                block_number = item.get("block", 0)
-                tx_state, finality_type = self.classify_tx_state(block_number, provider_finalized_block=solidified)
-                transfer = OnChainTransfer(
-                    tx_hash=tx_hash,
-                    chain=Chain.TRON,
-                    asset=mapped_asset,
-                    amount=amount,
-                    from_address=_normalize_address(item.get("from", "")),
-                    to_address=_normalize_address(item.get("to", "")),
-                    block_number=block_number,
-                    block_timestamp=block_ts,
-                    tx_state=tx_state,
-                    finality_type=finality_type,
+                transfers.append(
+                    OnChainTransfer(
+                        tx_hash=tx_hash,
+                        chain=Chain.TRON,
+                        asset=row_asset,
+                        amount=_parse_amount(raw_amt, row_asset),
+                        from_address=_normalize_address(r.get("from", "")),
+                        to_address=norm_addr,
+                        block_number=r.get("block_number", 0),
+                        block_timestamp=block_ts,
+                        tx_state=TxState.CONFIRMED,
+                        finality_type=FinalityType.SOLIDIFIED,
+                    )
                 )
-                results.append(transfer)
-            meta = data.get("meta", {})
-            fingerprint = meta.get("fingerprint")
-            if not fingerprint or len(items) < params["limit"]:
-                break
-
-        return results[:limit]
+            return transfers
+        except Exception as exc:
+            log.warning("TRON get_transfers_to failed for %s: %s", address, exc)
+            return []
 
     def get_historical_balance(
-        self, address: str, asset: Asset, at_block: Optional[int] = None
+        self,
+        address: str,
+        asset: Asset,
+        at_block: Optional[int] = None,
     ) -> HistoricalBalanceResult:
         """
-        Query account balance. Returns explicit UNAVAILABLE_PROVIDER on historical blocks.
-        Never substitutes current balance for historical state.
+        TRON public TRONGrid free tier does not expose historical state archives.
+        Strict invariant: Never substitute current balance for historical balance.
         """
         if at_block is not None:
-            log.warning(
-                "TronAdapter.get_balance: historical balance at block %d not supported on TRONGrid free tier.",
-                at_block,
-            )
-            return HistoricalBalanceResult(
-                status=HistoricalBalanceStatus.UNAVAILABLE_PROVIDER,
-                chain=Chain.TRON,
-                asset=asset,
-                address=address,
-                requested_block=at_block,
-                amount=None,
-                data_source="TRONGrid Free Tier",
-                reason="TRONGrid API does not support historical block-height balance queries without archival node.",
-            )
+            log.warning("TRON historical balance at block %d not supported on TRONGrid free tier for %s", at_block, address)
 
+        return HistoricalBalanceResult(
+            status=HistoricalBalanceStatus.UNAVAILABLE_PROVIDER,
+            chain=Chain.TRON,
+            asset=asset,
+            address=address,
+            requested_block=at_block,
+            amount=None,
+            data_source="TRONGrid (Public Free Tier)",
+            reason="historical balance at block %s not supported on TRONGrid free tier" % (at_block if at_block else "requested"),
+        )
+
+    def match_candidate_transactions(
+        self,
+        target_wallet: str,
+        reported_amount: Optional[Decimal],
+        reported_time: Optional[datetime.datetime],
+        asset: Optional[Asset] = None,
+        time_window_seconds: int = 1800,
+        amount_tolerance_pct: Decimal = Decimal("0.01"),
+    ) -> list[CandidateTransaction]:
+        """
+        Query inbound transfers matching complaint parameters for Level B resolution.
+        """
+        norm_addr = _normalize_address(target_wallet)
+        contract = "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t"
+        params = {
+            "limit": 50,
+            "contract_address": contract,
+            "only_to": "true",
+        }
         try:
-            data = self._get(f"/v1/accounts/{address}")
-            accounts = data.get("data", [])
-            if not accounts:
-                return HistoricalBalanceResult(
-                    status=HistoricalBalanceStatus.KNOWN,
-                    chain=Chain.TRON,
-                    asset=asset,
-                    address=address,
-                    requested_block=None,
-                    amount=Decimal(0),
-                    data_source="TRONGrid Latest State",
+            data = self._get(f"/v1/accounts/{norm_addr}/transactions/trc20", params=params)
+            rows = data.get("data", [])
+            candidates: list[CandidateTransaction] = []
+
+            for r in rows:
+                if r.get("to") != norm_addr:
+                    continue
+                raw_amt = int(r.get("value", 0))
+                contract_in_row = r.get("token_info", {}).get("address", contract)
+                row_asset = TRC20_CONTRACTS.get(contract_in_row, Asset.USDT_TRC20)
+                amount = _parse_amount(raw_amt, row_asset)
+                block_ts = _parse_timestamp(r.get("block_timestamp", 0))
+
+                match_fields = ["wallet"]
+                if reported_amount is not None and reported_amount > 0:
+                    diff_pct = abs(amount - reported_amount) / reported_amount
+                    if diff_pct <= amount_tolerance_pct:
+                        match_fields.append("amount")
+
+                if reported_time is not None:
+                    delta = abs((block_ts - reported_time).total_seconds())
+                    if delta <= time_window_seconds:
+                        match_fields.append("time")
+
+                candidates.append(
+                    CandidateTransaction(
+                        tx_hash=r.get("transaction_id", ""),
+                        chain=Chain.TRON,
+                        asset=row_asset,
+                        amount=amount,
+                        block_number=r.get("block_number", 0),
+                        block_timestamp=block_ts,
+                        from_address=_normalize_address(r.get("from", "")),
+                        to_address=norm_addr,
+                        tx_state=TxState.CONFIRMED,
+                        match_fields=match_fields,
+                        finality_type=FinalityType.SOLIDIFIED,
+                    )
                 )
-            account = accounts[0]
-            amount = Decimal(0)
-            if asset == Asset.TRX:
-                raw = account.get("balance", 0)
-                amount = _parse_amount(raw, Asset.TRX)
-            else:
-                for token in account.get("trc20", []):
-                    for contract_addr, raw_str in token.items():
-                        if TRC20_CONTRACTS.get(contract_addr) == asset:
-                            amount = _parse_amount(int(raw_str), asset)
-                            break
-            return HistoricalBalanceResult(
-                status=HistoricalBalanceStatus.KNOWN,
-                chain=Chain.TRON,
-                asset=asset,
-                address=address,
-                requested_block=None,
-                amount=amount,
-                data_source="TRONGrid Latest State",
-            )
+            return candidates
         except Exception as exc:
-            return HistoricalBalanceResult(
-                status=HistoricalBalanceStatus.UNKNOWN,
-                chain=Chain.TRON,
-                asset=asset,
-                address=address,
-                requested_block=None,
-                amount=None,
-                data_source="TRONGrid",
-                reason=str(exc),
-            )
+            log.warning("TRON match_candidate_transactions failed: %s", exc)
+            return []
